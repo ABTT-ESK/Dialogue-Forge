@@ -1,0 +1,338 @@
+# DialogueForge guide
+
+Everything the program does, tab by tab. Skim the bit you need.
+
+---
+
+## Before anything else
+
+Two folder boxes sit at the top of the window. Set them once and
+DialogueForge remembers them.
+
+**Server profile folder** — the `DialogFramework` folder inside your server
+profile, the one containing `MenuConfig.json` and `Dialogues\`. Start your
+server once if it isn't there yet.
+
+**Expansion quests** — optional but worth doing. Point it at your Expansion
+`Quests` folder and every quest field turns into a dropdown of real quest
+names instead of ID numbers. It finds NPC names too.
+
+---
+
+## Dialogue
+
+Where you write conversations. It splits into two pages.
+
+### Who it's for & voice lines
+
+Set this first. Pick what the conversation belongs to:
+
+| Choice | What to enter |
+|---|---|
+| **A single quest NPC** | The NPC's ID. Use **Pick NPC...** to choose by name. |
+| **A trader** | The trader's name, e.g. `Weapons`. |
+| **Shared by several NPCs** | Every NPC ID that should use it, comma separated. |
+
+The strip at the top of the tab always shows where the file will save.
+
+Greeting and farewell voice lines are optional. Add several and the mod
+picks one at random.
+
+**Traders only:** you can narrow down *which* trader by class name or world
+position. "Keys that must agree" is how many of those need to match. If you
+only fill in the trader name, set it to 1.
+
+### Quest talk
+
+What this NPC says around their quest list, for this NPC as a whole.
+
+- **What they say when showing their quests** — when a player asks for work,
+  the buttons become that NPC's quest list. These are the lines spoken above
+  it. Blank means every NPC uses the built-in *"What do you need done?"*
+- **What they say when they have no quests** — the lines, plus buttons that go
+  back to the start of the conversation or end it, plus optional voice lines
+
+Both are lists, and one entry is picked at random each visit. Three or four
+phrasings is enough to stop a busy NPC sounding scripted, and costs nothing
+per quest.
+
+All of it is optional; blank means the mod's built-in text. Leave even the
+buttons empty and players still get a plain **Back** button, so this step can
+never strand them.
+
+Anything a completed quest sets under **Quest wording → When this NPC has
+nothing left to give** overrides the line here. Buttons fall back
+independently, so a quest can supply the line while these supply the buttons.
+
+Voice lines for this step are NPC-wide — there's no per-quest version.
+
+### Flow
+
+Three panels.
+
+**Conversation outline (left)** — your whole conversation as a list. Nodes
+are the top level, and each node's player options sit underneath it. The
+"Leads to" column shows where each option goes. A padlock means the option
+is hidden until a quest is done. The ▶ marks where the conversation starts.
+
+**Editor (middle)** — click a node to edit what the NPC says. Click an
+option to edit the option.
+
+**Branch map (right)** — the same conversation drawn as boxes, laid out left
+to right. Gold outline is where you are. Click any box to jump to it. A gold
+`!` means nothing leads to that node, so players can never reach it.
+
+### Writing a conversation
+
+A **node** is one screen: what the NPC says, plus the buttons the player can
+press.
+
+Each button needs two things — its text, and what it does:
+
+| What it does | Result |
+|---|---|
+| **NONE** | Go to the node you pick in "Next node". |
+| **SHOW_QUEST_LIST** | Open this NPC's quest list. |
+| **END_CONVERSATION** | Say goodbye and close. |
+| **OPEN_TRADER** | Close and open the shop. Traders only. |
+
+"Next node" only applies to **NONE** — it greys itself out otherwise.
+
+**Only after quest** hides a button until the player has *completed* that
+quest. Use **Browse quests...** to pick by name.
+
+Renaming a node ID automatically repoints everything that led to it, so you
+can renumber without breaking anything.
+
+---
+
+## Quest wording
+
+Every field is labelled **(NPC says)** or **(Player says)**. NPC lines are
+spoken above the buttons and one is picked at random; player lines each become
+their own button.
+
+What your NPCs say around a quest. One entry per quest, five sets of
+wording:
+
+- **Accept buttons** — when the quest is offered
+- **Decline buttons** — ways to say no
+- **While in progress** — accepted but not finished
+- **Turn-in buttons** — ready to hand in
+- **Back out of turn-in** — the "not yet" button
+
+Every line you add becomes its own button, so a few phrasings makes an NPC
+feel less robotic.
+
+Anything you leave empty uses the mod's built-in wording. Partial files are
+completely fine.
+
+The **Reward picker line** is a single spoken line above the reward choice,
+used only by quests that let the player pick a reward.
+
+### Once this quest is completed
+
+The last group on the tab changes what an NPC says as a player works through
+their quests.
+
+**These apply after the quest is turned in, not while it is available.** Fill
+them in on quest 101 and they take effect the moment 101 is completed — while
+102 is sitting on the list waiting to be taken — and last until the player
+completes something higher-numbered for that NPC.
+
+**Their quest list greeting from now on** is the line over the quest list;
+**What they say with nothing left** covers having nothing to offer, with
+buttons that return to the start of the conversation or end it.
+
+If several completed quests have wording, the **highest quest ID wins**, so a
+chain advances what the NPC says on its own — a veteran isn't greeted like a
+stranger, and their parting words can point at whoever gives the next quest:
+
+> Quest 2 — *"Wall's done. Talk to Hana at the docks, she's the one hiring
+> now."*
+
+The moment quest 2 is turned in, that becomes the NPC's parting line, until
+the player finishes something later in the chain.
+
+A quest's buttons are only used when that same quest also has a line, so
+buttons on their own never appear — the problem checker flags this. Leave the
+buttons empty and the NPC falls back to the ones on its dialogue tab. Leave
+everything empty and players still get a plain **Back** button, so this step
+can never strand them.
+
+---
+
+## Menu appearance
+
+How the dialogue window looks.
+
+**Placement** — nine screen positions, plus sliders for size and nudging.
+`BOTTOM_CENTER` keeps the NPC's face visible; `CENTER` covers them up.
+
+**Colours** — a picker and a transparency slider for each part of the
+window. Four ready-made palettes are in the Preset dropdown.
+
+**Font style** — four text presets built into the mod: `DEFAULT`, `LIGHT`
+(thinner), `LARGE` (bigger), `COMPACT` (smaller, fits more options).
+
+**Already-picked fade** dims options the player has already chosen this
+conversation.
+
+The preview on the right shows roughly what you'll get. It's a guide to
+placement, size and colour balance, not an exact match for in-game fonts.
+
+---
+
+### Hint icons
+
+**Hint icons on buttons** puts a small icon on the right of every response
+button so players can see what one does before clicking: an exit door for
+anything that closes the menu, a shopping cart for opening the market, a
+speech bubble for anything that keeps the conversation going.
+
+They take their colour from your response text colour, so they match whatever
+theme you set. Off by default.
+
+Turn it on and both previews show the icons, picked from what each option
+actually does — so on the Dialogue tab you can see at a glance whether an
+option reads as "this ends the chat" before a player ever clicks it.
+
+## Server files
+
+Everything found in your profile folder. Double-click any file to open it in
+the right editor.
+
+**Create folder structure** makes the folders for you if you're starting
+fresh. **Open LoadLog.txt** shows what the mod made of your files last time
+the server started — the first place to look when something didn't work.
+
+---
+
+## The buttons along the top
+
+| Button | What it does |
+|---|---|
+| **New (blank)** | Clears the current tab to start fresh. Files on disk aren't touched. |
+| **Open file...** | Opens any config in the right editor. |
+| **Save** | Saves to the path shown on the tab. |
+| **Save as / copy to...** | Saves somewhere else, leaving the original alone. |
+| **Check this tab** | Checks what you're working on. |
+| **Check ALL config files** | Checks everything in your folder. |
+| **Dark / Light mode** | Switches the look of the program. |
+
+### Copying a conversation to another NPC
+
+The reason **Save as / copy to...** exists:
+
+1. Open an existing conversation from the Server files tab.
+2. Change whatever you want.
+3. **Save as / copy to...**, pick the new NPC or trader, confirm.
+
+The file you opened is never modified.
+
+---
+
+## Live preview
+
+**Live preview** in the top right opens a second window you can drag onto
+another monitor or beside the app. It shows the in-game screen for whatever
+you're currently editing, and follows your cursor:
+
+- **Dialogue tab** — the node you have selected, with its buttons. The
+  response you're editing is outlined the way a hover looks in game
+- **Quest wording** — click into a field and the preview switches to the
+  screen that field appears on. Accept and decline show the offer screen,
+  turn-in shows the hand-in screen, the no-quests fields show that step
+- **Menu appearance** — sample text, so you can judge colours and size
+
+Colours, window size and font style come from your Menu appearance tab, so it
+reflects your server rather than a generic theme. It's approximate: real fonts
+and spacing come from the game.
+
+Close it and reopen any time; it doesn't hold anything.
+
+## Checking for problems
+
+Both check buttons split what they find into **will break in game** and
+**worth a look**.
+
+Things it catches:
+
+- Buttons pointing at nodes that don't exist
+- Nodes nothing leads to
+- Nodes where every option is hidden behind a quest — players who haven't
+  done them see a line of dialogue with no buttons at all
+- Shared conversations with no NPC IDs listed
+- Traders set to match on more keys than you've filled in, which never matches
+- A trader conversation with no way to reach the shop
+- Invisible colours and windows pushed off-screen
+
+**Check ALL config files** adds problems you can only see across files:
+
+- Two files claiming the same NPC — only one wins, and the other is ignored
+- The same quest worded in two files
+- Files sitting in a folder the mod doesn't recognise
+- Files with broken JSON
+
+**Copy report** puts the whole thing on your clipboard, handy for pasting
+into a support thread.
+
+---
+
+## Bringing an old file up to date
+
+When the mod adds new settings, opening a file here and **saving it** is all
+it takes — DialogueForge always writes the complete current set of fields, and
+leaves everything you already wrote exactly as it was.
+
+This matters most for **dialogue trees**, which the mod deliberately never
+rewrites. Menu config and quest text files add new fields to themselves on the
+next server start; dialogue trees don't, because they're the files with the
+most work in them.
+
+Nothing breaks if you skip this. An old tree keeps working exactly as it did —
+you just won't see the newer options until you open and save it, or add the
+keys by hand.
+
+## Closing with unsaved work
+
+If you try to close the app with changes you haven't saved, it asks first and
+names which editors are affected — **Yes** saves them all and closes, **No**
+closes and loses them, **Cancel** goes back. The title bar carries a `*` while
+anything is unsaved.
+
+If a save is cancelled on the way out (you decline an overwrite, say), the app
+stays open rather than closing anyway.
+
+## After you save
+
+Dialogue and appearance changes need:
+
+1. A server restart
+2. A **full** game restart — closing to the menu and reconnecting isn't
+   enough
+
+Then check `Dialogues\LoadLog.txt` to confirm the mod read your files.
+
+---
+
+## Window size
+
+The window opens sized to your screen, so it fits whether you're on 1080p or
+something larger, and it's designed to be used windowed alongside other
+things.
+
+If a panel is taller than the space available, it scrolls — a scrollbar
+appears on that panel only when it's needed, and the mouse wheel scrolls
+whatever the pointer is over. Nothing gets cut off with no way to reach it.
+
+## When something isn't working
+
+| What you see | Likely cause |
+|---|---|
+| Changes didn't appear | Client wasn't fully restarted |
+| NPC has no buttons | Every option is quest-gated — run a check |
+| Dialogue box invisible | A colour with transparency set to 0 |
+| Window off-screen | Nudge sliders pushed too far; set both to 0 |
+| A conversation didn't load | Check `LoadLog.txt` |
+| Quest dropdown is empty | Expansion quests folder isn't set |
