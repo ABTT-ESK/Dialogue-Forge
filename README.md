@@ -17,12 +17,10 @@ numbers and hunting for the one missing comma that stops the whole file
 loading. DialogueForge gives you the same files through a normal Windows
 program.
 
-No install.  No coding. Download it, run it, point it at your
-server profile folder.
+No install. No coding. Download it, run it, point it at your server profile
+folder.
 
-<img src="docs/images/dfw1.png" alt="The dialogue editor, showing the conversation outline, the node editor and the branch map">
-
-<img src="docs/images/dfw2.png" alt="The dialogue editor, showing the conversation outline, the node editor and the branch map">
+<img src="docs/images/DF1.png" alt="The dialogue editor, showing the conversation outline, the node editor and the branch map">
 
 ## What it does
 
@@ -33,59 +31,133 @@ wording, and the menu appearance — all from one window.
 
 **Shows you the shape of the conversation**
 
-The branch map on the right draws your whole conversation as connected
-boxes. The one you're editing glows gold, so you always know where you are.
-Click any box to jump to it.
+The branch map draws your whole conversation as connected boxes. The one
+you're editing glows gold, so you always know where you are. Click any box to
+jump to it.
+
+**Shows you the menu as you type**
+
+The live preview draws the actual in-game screen for whatever you're editing,
+using your colours and your font style. More on this below.
 
 **Catches mistakes before your players do**
 
-One button checks every config in your folder and tells you, in plain
-English, what will break. Dead ends, options nobody can ever see, two files
-fighting over the same NPC.
+One button checks every config in your folder and tells you, in plain English,
+what will break. Dead ends, options nobody can ever see, two files fighting
+over the same NPC.
 
 **Picks quests by name**
 
-Point it at your Expansion quests folder once and every quest field becomes
-a dropdown of real names. No more digging through files for an ID number.
+Point it at your Expansion quests folder once and every quest field becomes a
+dropdown of real names. No more digging through files for an ID number.
+
+---
+
+## Live preview
+
+Click **Live preview** and a second window opens. Put it on another monitor and
+leave it there — it redraws as you type.
+
+It isn't a generic mock-up. It uses **your** colours, window size and font
+style from the Menu appearance tab, so what you see is what your server looks
+like. If hint icons are on, it draws those too, using the same rule the mod
+does — so an option that closes the menu shows the exit icon before a player
+ever clicks it.
+
+**On the quest wording tab it follows your cursor.** Click into the accept
+buttons and it shows the quest offer screen. Click into the turn-in fields and
+it switches to the hand-in screen. Click into the no-quests wording and it
+shows that step, with your buttons under it. You never have to guess where a
+line ends up.
+
+<img src="docs/images/DF7.png" alt="The dialogue editor, showing the conversation outline, the node editor and the branch map">
+
+
+---
 
 ## A look around
+
+### Dialogue
+
+Three pages. **Flow** for the conversation itself, **Who it's for & voice
+lines** for targeting and audio, and **Quest talk** for what this NPC says
+around their quest list.
+
+<img src="docs/images/DF1.png" alt="The dialogue editor with the branch map">
+
+### Quest talk
+
+Two things live here, both optional:
+
+- **What they say when showing their quests** — the line above their quest
+  list, replacing the mod's built-in *"What do you need done?"*
+- **What they say when they have no quests** — the line, plus buttons that
+  carry on the conversation or end it
+
+Both are lists, and one entry is picked at random per visit. Three or four
+phrasings stops a busy NPC sounding scripted, and costs nothing per quest.
+
+<img src="docs/images/DF3.png" alt="The dialogue editor, showing the conversation outline, the node editor and the branch map">
+
+### Quest wording
+
+What your NPCs say when a quest is offered, accepted, in progress or handed
+in. Every field is labelled **(NPC says)** or **(Player says)**, so you always
+know whether you're writing dialogue or a button.
+
+The last group — **Once this quest is completed** — is where a chain gets its
+voice. Fill it in on quest 2 and the moment quest 2 is turned in, that becomes
+what the NPC says, until the player finishes something later in the chain:
+
+> *"Wall's up. Talk to Hana at the docks — she's the one hiring now."*
+
+That's the natural place to point players at whoever hands out the next quest.
+If several completed quests have wording, the highest quest ID wins, so the
+chain advances on its own with no extra setup.
+
+Anything you leave blank falls back to the mod's built-in text, so you only
+fill in what you care about.
+
+<img src="docs/images/DF4.png" alt="The quest wording tab">
 
 ### Menu appearance
 
 Colour pickers for every part of the window, sliders for size and position,
-and a live preview so you can see what you're building. Colours are always
-written in the right order, which removes the single most common cause of an
-invisible dialogue box.
+font presets, and the hint-icon toggle — with a live preview beside it.
+Colours are always written in the right order, which removes the single most
+common cause of an invisible dialogue box.
 
-<img src="docs/images/dfw4.png" alt="The menu appearance tab with colour pickers and a live preview">
-
-### Quest wording
-
-Write what your NPCs say when a quest is offered, accepted, in progress or
-handed in — and what they say once they have nothing left, so a finished
-chain can point players at whoever hands out the next one. Add as many phrasings as you like — each one becomes its own
-button in game. Anything you leave blank falls back to the mod's built-in
-text, so you only fill in what you care about.
-
-<img src="docs/images/dfw3.png" alt="The quest wording tab">
+<img src="docs/images/DF5.png" alt="The menu appearance tab with colour pickers and a live preview">
 
 ### Check everything at once
 
-<img src="docs/images/DFW6.png" alt="The check-all-files report showing 30 files checked with nothing to report">
+Dead node references, unreachable branches, duplicate IDs, and wording that
+can never appear because nothing in the tree opens that screen.
+
+<img src="docs/images/DF8.png" alt="The check-all-files report showing 30 files checked with nothing to report">
 
 ### Your whole setup, listed
 
 Every config found in your profile folder. Double-click one to open it.
 
-<img src="docs/images/dfw5.png" alt="The server files tab listing every config found">
+<img src="docs/images/DF6.png" alt="The server files tab listing every config found">
 
-**Updating a config after a mod update?** Open the file and save it — that
-writes any newly-added fields while keeping your work. Nothing breaks if you
-don't; you just won't see the new options until you do.
+---
 
-**Live preview** opens a second window showing where your text lands on the
-in-game menu, updating as you type. Put it on a second monitor while you
-write.
+## Updating configs after a mod update
+
+When Dialogue Framework adds new settings, `MenuConfig.json` and your quest
+text files bring themselves up to date on the next server start.
+
+**Dialogue trees don't** — on purpose. They're the files with the most work in
+them, so the mod stays read-only on them and can't damage a conversation you
+spent hours writing.
+
+**Open the tree here and save it.** That writes every current field while
+leaving your conversation exactly as it was. That's the whole procedure.
+
+Nothing breaks if you skip it. An old tree keeps working — you just won't see
+the newer options until you open and save it.
 
 ## Getting started
 
@@ -99,15 +171,15 @@ write.
 That's it. The **Server files** tab now lists everything you have, and
 double-clicking a file opens it.
 
-> **Windows will show a blue "Windows protected your PC" box the first
-> time.** That happens with any small free tool that isn't signed with an
-> expensive certificate. Click **More info**, then **Run anyway**. If you'd
-> rather not take my word for it, all the source is in this repo and you can
-> build it yourself with `build_exe.bat`.
+> **Windows will show a blue "Windows protected your PC" box the first time.**
+> That happens with any small free tool that isn't signed with an expensive
+> certificate. Click **More info**, then **Run anyway**. If you'd rather not
+> take my word for it, all the source is in this repo and you can build it
+> yourself with `build_exe.bat`.
 
 **After saving anything:** restart your server, then fully close and reopen
-your game — a reconnect isn't enough. Then check
-`Dialogues\LoadLog.txt`; there's a button for it on the Server files tab.
+your game — a reconnect isn't enough. Then check `Dialogues\LoadLog.txt`;
+there's a button for it on the Server files tab.
 
 ## Needs
 
