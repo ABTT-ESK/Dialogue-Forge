@@ -1,8 +1,11 @@
 """
 DialogueForge - a config editor for the DayZ Dialogue Framework mod.
 
-Single-file Tkinter app. No third-party dependencies.
-Run with:  python DialogueForge.py
+Single-file Tkinter app. Stdlib only, except for one optional extra:
+`pyspellchecker` powers the spellcheck. It is bundled into the release .exe
+by PyInstaller; if it isn't installed when running from source, the app still
+runs and spellcheck simply switches itself off.
+Run with:  python DialogueForge.py   (pip install pyspellchecker for spellcheck)
 Build an .exe with build_exe.bat (PyInstaller).
 
 Edits:
@@ -20,6 +23,13 @@ import copy
 import webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser, simpledialog
+
+# Optional: bundled into the release .exe by PyInstaller, but the app must
+# still run from source without it (spellcheck just quietly turns off).
+try:
+    from spellchecker import SpellChecker
+except Exception:
+    SpellChecker = None
 
 APP_TITLE = "DialogueForge - DayZ Dialogue Framework config editor"
 SETTINGS_FILE = os.path.join(
@@ -53,6 +63,14 @@ ACTION_HELP = {
 }
 
 NODE_TYPES = ["STANDARD", "QUEST_LIST", "QUEST_DETAIL"]
+
+# First entry in the "Quest lock" dropdown - means RequiredQuestID = -1,
+# i.e. the option is always shown rather than gated behind a finished quest.
+NOT_LOCKED_LABEL = "Not locked"
+
+# First entry in a speaker line's "Standard greeting after" dropdown - means
+# OverrideQuestID = -1, i.e. the line never takes over as the fixed greeting.
+OVERRIDE_NONE_LABEL = "No override"
 
 # Built into the mod as of ConfigVersion 2 - no repacking needed.
 FONT_STYLES = [
@@ -293,6 +311,7 @@ def new_node(node_id):
         "Type": "STANDARD",
         "SpeakerText": "",
         "VoiceLineIDs": [],
+        "SpeakerLines": [],
         "Responses": [],
     }
 
@@ -314,6 +333,10 @@ def new_tree():
         "NoQuestsBackTexts": [],
         "NoQuestsLeaveTexts": [],
         "NoQuestsVoiceLineIDs": [],
+        "QuestListBackTexts": [],
+        "OfferBackTexts": [],
+        "InProgressBackTexts": [],
+        "TurnInBackTexts": [],
         "Nodes": [new_node(1)],
     }
 
@@ -330,6 +353,10 @@ def new_quest_entry(quest_id=1):
         "NoQuestsTexts": [],
         "NoQuestsBackTexts": [],
         "NoQuestsLeaveTexts": [],
+        "QuestListBackTexts": [],
+        "OfferBackTexts": [],
+        "InProgressBackTexts": [],
+        "TurnInBackTexts": [],
         "RewardSelectText": "",
     }
 
@@ -384,6 +411,306 @@ def write_json(path, data):
         json.dump(data, handle, indent=4, ensure_ascii=False)
 
 
+def add_entry_undo(entry):
+    """Give a tk/ttk Entry a simple undo/redo stack on Ctrl+Z / Ctrl+Y.
+
+    tk.Text has undo built in; Entry doesn't, so we snapshot the text after
+    each edit and step back through the snapshots. After restoring we fire a
+    synthetic <KeyRelease> so whatever the entry normally commits on typing
+    (marking the file dirty, updating the outline) stays in sync.
+    """
+    undo_stack = [entry.get()]
+    redo_stack = []
+    state = {"last": entry.get()}
+
+    def snapshot(_event=None):
+        current = entry.get()
+        if current != state["last"]:
+            undo_stack.append(current)
+            state["last"] = current
+            del redo_stack[:]
+
+    def restore(value):
+        entry.delete(0, tk.END)
+        entry.insert(0, value)
+        state["last"] = value
+        entry.event_generate("<KeyRelease>")
+
+    def undo(_event=None):
+        snapshot()
+        if len(undo_stack) > 1:
+            redo_stack.append(undo_stack.pop())
+            restore(undo_stack[-1])
+        return "break"
+
+    def redo(_event=None):
+        if redo_stack:
+            value = redo_stack.pop()
+            undo_stack.append(value)
+            restore(value)
+        return "break"
+
+    def resync(_event=None):
+        # Editors reuse one widget for many rows, so refresh the baseline
+        # whenever the value is replaced from outside (loading a new item).
+        current = entry.get()
+        if current != state["last"]:
+            del undo_stack[:]
+            undo_stack.append(current)
+            del redo_stack[:]
+            state["last"] = current
+
+    entry.bind("<KeyRelease>", snapshot, add="+")
+    entry.bind("<FocusIn>", resync, add="+")
+    entry.bind("<Control-z>", undo, add="+")
+    entry.bind("<Control-Z>", undo, add="+")
+    entry.bind("<Control-y>", redo, add="+")
+    entry.bind("<Control-Shift-Z>", redo, add="+")
+    return entry
+
+
+# ---------------------------------------------------------------- spellcheck
+# Powered by the optional pyspellchecker package. Everything degrades to a
+# no-op when it isn't importable, so the app never depends on it being there.
+
+WORD_RE = re.compile(r"[A-Za-z][A-Za-z'’]*")
+
+# Words worth flagging: skip short tokens, anything with a digit, ALL-CAPS
+# acronyms (NPC, ID) and CamelCase class names (ExpansionTraderAIDenis) -
+# a dialogue tool is full of those and underlining them is just noise.
+def spell_checkable(token):
+    if len(token) < 3:
+        return False
+    if any(ch.isdigit() for ch in token):
+        return False
+    if token.isupper():
+        return False
+    if any(ch.isupper() for ch in token[1:]):
+        return False
+    return True
+
+
+class SpellManager:
+    """One shared spellchecker plus a user dictionary the player can grow.
+
+    The English word list is heavy to build, so it's created lazily the first
+    time something is actually checked, not at import or startup.
+    """
+
+    def __init__(self):
+        self.checker = None
+        self._built = False
+        self.custom = set()
+        self.custom_path = os.path.join(
+            os.path.expanduser("~"), ".dialogueforge_dictionary.txt")
+
+    def _build(self):
+        if self._built:
+            return
+        self._built = True
+        if SpellChecker is None:
+            return
+        try:
+            self.checker = SpellChecker()
+        except Exception:
+            self.checker = None
+            return
+        try:
+            with open(self.custom_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    word = line.strip().lower()
+                    if word:
+                        self.custom.add(word)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        if self.custom:
+            self.checker.word_frequency.load_words(self.custom)
+
+    def available(self):
+        self._build()
+        return self.checker is not None
+
+    def known(self, word):
+        if not self.available():
+            return True
+        lowered = word.lower()
+        return lowered in self.custom or lowered in self.checker
+
+    def suggest(self, word, limit=7):
+        if not self.available():
+            return []
+        try:
+            candidates = self.checker.candidates(word)
+        except Exception:
+            candidates = None
+        if not candidates:
+            return []
+        ordered = []
+        best = self.checker.correction(word)
+        if best and best in candidates:
+            ordered.append(best)
+        for candidate in candidates:
+            if candidate not in ordered:
+                ordered.append(candidate)
+        return ordered[:limit]
+
+    def add_word(self, word):
+        word = (word or "").strip().lower()
+        if not word:
+            return
+        self.custom.add(word)
+        if self.checker is not None:
+            self.checker.word_frequency.load_words([word])
+        try:
+            with open(self.custom_path, "a", encoding="utf-8") as handle:
+                handle.write(word + "\n")
+        except Exception:
+            pass
+
+
+SPELL = SpellManager()
+
+
+def _popup_menu(menu, event):
+    try:
+        menu.tk_popup(event.x_root, event.y_root)
+    finally:
+        menu.grab_release()
+
+
+def attach_text_spellcheck(text):
+    """Red-underline misspellings in a tk.Text and offer fixes on right-click."""
+    if SpellChecker is None:
+        return
+    text.tag_configure("spell_bad", foreground="#e05555", underline=True)
+    pending = {"id": None}
+
+    def recheck():
+        pending["id"] = None
+        if not SPELL.available():
+            return
+        text.tag_remove("spell_bad", "1.0", tk.END)
+        content = text.get("1.0", "end-1c")
+        for match in WORD_RE.finditer(content):
+            token = match.group()
+            if not spell_checkable(token) or SPELL.known(token):
+                continue
+            text.tag_add("spell_bad",
+                         "1.0+%dc" % match.start(),
+                         "1.0+%dc" % match.end())
+
+    def schedule(_event=None):
+        if pending["id"] is not None:
+            text.after_cancel(pending["id"])
+        pending["id"] = text.after(400, recheck)
+
+    def on_modified(_event=None):
+        if text.edit_modified():
+            text.edit_modified(False)
+            schedule()
+
+    def replace(start, end, word):
+        text.delete(start, end)
+        text.insert(start, word)
+        recheck()
+        text.event_generate("<KeyRelease>")
+
+    def on_right_click(event):
+        text.focus_set()
+        index = text.index("@%d,%d" % (event.x, event.y))
+        start = text.index("%s wordstart" % index)
+        end = text.index("%s wordend" % index)
+        word = text.get(start, end).strip()
+        menu = tk.Menu(text, tearoff=0)
+        if word and spell_checkable(word) and not SPELL.known(word):
+            suggestions = SPELL.suggest(word)
+            if suggestions:
+                for suggestion in suggestions:
+                    menu.add_command(
+                        label=suggestion,
+                        command=lambda w=suggestion, s=start, e=end:
+                        replace(s, e, w))
+            else:
+                menu.add_command(label="(no suggestions)", state="disabled")
+            menu.add_command(
+                label="Add \"%s\" to dictionary" % word,
+                command=lambda w=word: (SPELL.add_word(w), recheck()))
+            menu.add_separator()
+        menu.add_command(label="Cut",
+                         command=lambda: text.event_generate("<<Cut>>"))
+        menu.add_command(label="Copy",
+                         command=lambda: text.event_generate("<<Copy>>"))
+        menu.add_command(label="Paste",
+                         command=lambda: text.event_generate("<<Paste>>"))
+        _popup_menu(menu, event)
+        return "break"
+
+    text.bind("<<Modified>>", on_modified, add="+")
+    text.bind("<Button-3>", on_right_click, add="+")
+    text.after_idle(lambda: text.edit_modified(False))
+
+
+def attach_entry_spellcheck(entry):
+    """Right-click spelling suggestions for a single-line Entry.
+
+    Entries can't underline individual words the way a Text can, so the fix is
+    offered through the context menu instead."""
+    if SpellChecker is None:
+        return
+
+    def word_span(x):
+        value = entry.get()
+        try:
+            index = entry.index("@%d" % x)
+        except Exception:
+            index = len(value)
+        left = index
+        while left > 0 and (value[left - 1].isalpha()
+                            or value[left - 1] in "'’"):
+            left -= 1
+        right = index
+        while right < len(value) and (value[right].isalpha()
+                                      or value[right] in "'’"):
+            right += 1
+        return left, right, value[left:right]
+
+    def replace(left, right, word):
+        entry.delete(left, right)
+        entry.insert(left, word)
+        entry.event_generate("<KeyRelease>")
+
+    def on_right_click(event):
+        entry.focus_set()
+        left, right, word = word_span(event.x)
+        menu = tk.Menu(entry, tearoff=0)
+        if word and spell_checkable(word) and not SPELL.known(word):
+            suggestions = SPELL.suggest(word)
+            if suggestions:
+                for suggestion in suggestions:
+                    menu.add_command(
+                        label=suggestion,
+                        command=lambda w=suggestion, l=left, r=right:
+                        replace(l, r, w))
+            else:
+                menu.add_command(label="(no suggestions)", state="disabled")
+            menu.add_command(
+                label="Add \"%s\" to dictionary" % word,
+                command=lambda w=word: SPELL.add_word(w))
+            menu.add_separator()
+        menu.add_command(label="Cut",
+                         command=lambda: entry.event_generate("<<Cut>>"))
+        menu.add_command(label="Copy",
+                         command=lambda: entry.event_generate("<<Copy>>"))
+        menu.add_command(label="Paste",
+                         command=lambda: entry.event_generate("<<Paste>>"))
+        _popup_menu(menu, event)
+        return "break"
+
+    entry.bind("<Button-3>", on_right_click, add="+")
+
+
 # ---------------------------------------------------------------- widgets
 
 class StringListEditor(ttk.LabelFrame):
@@ -412,6 +739,8 @@ class StringListEditor(ttk.LabelFrame):
         self.entry = ttk.Entry(self)
         self.entry.grid(row=2, column=0, sticky="ew", padx=(6, 4), pady=(0, 4))
         self.entry.bind("<Return>", lambda _e: self.add())
+        add_entry_undo(self.entry)
+        attach_entry_spellcheck(self.entry)
 
         buttons = ttk.Frame(self)
         buttons.grid(row=2, column=1, columnspan=2, sticky="e",
@@ -478,6 +807,390 @@ class StringListEditor(ttk.LabelFrame):
             self.items[target], self.items[index]
         self.refresh()
         self.listbox.selection_set(target)
+        self._fire()
+
+
+class CollapsibleSection(ttk.Frame):
+    """A titled panel whose body shows or hides when its header is clicked.
+
+    Lets a tab read as a short list of section headers you open as needed,
+    instead of every field being on screen at once. Add this section's widgets
+    to content()."""
+
+    def __init__(self, master, title, expanded=False, subtitle=""):
+        ttk.Frame.__init__(self, master, style="Section.TFrame")
+        self._expanded = bool(expanded)
+
+        self.header = ttk.Frame(self, style="SectionHeader.TFrame",
+                                cursor="hand2")
+        self.header.pack(fill="x")
+        self._arrow = ttk.Label(self.header, width=2,
+                                style="SectionTitle.TLabel", cursor="hand2")
+        self._arrow.pack(side="left", padx=(6, 0), pady=3)
+        self._title = ttk.Label(self.header, text=title,
+                                style="SectionTitle.TLabel", cursor="hand2")
+        self._title.pack(side="left", pady=3)
+        if subtitle:
+            ttk.Label(self.header, text=subtitle, style="SectionSub.TLabel",
+                      cursor="hand2").pack(side="left", padx=10, pady=3)
+
+        # The whole header bar is the click target, not just the words.
+        for widget in (self.header, self._arrow, self._title):
+            widget.bind("<Button-1>", self._toggle)
+
+        self.body = ttk.Frame(self, style="SectionBody.TFrame")
+        self._sync()
+
+    def _toggle(self, _event=None):
+        self._expanded = not self._expanded
+        self._sync()
+
+    def _sync(self):
+        self._arrow.configure(text="▾" if self._expanded else "▸")
+        if self._expanded:
+            self.body.pack(fill="x")
+        else:
+            self.body.pack_forget()
+
+    def set_expanded(self, expanded):
+        if bool(expanded) != self._expanded:
+            self._toggle()
+
+    def content(self):
+        """The frame to place this section's widgets in."""
+        return self.body
+
+
+class SpeakerLinesEditor(ttk.LabelFrame):
+    """Extra spoken lines for a node. The mod picks one at random from the
+    node's main line plus whichever of these the player qualifies for; each
+    line can be locked to a completed quest and carry its own voice lines."""
+
+    def __init__(self, master, app, on_change=None):
+        ttk.LabelFrame.__init__(
+            self, master, text="Extra spoken lines (optional)")
+        self.app = app
+        self.on_change = on_change
+        self.lines = []
+        self.current = None
+        self.loading = False
+
+        ttk.Label(
+            self,
+            text="One line is picked at random from the main line above plus "
+                 "any of these the player qualifies for. Lock a line to a "
+                 "completed quest to reveal it later, so a greeting keeps "
+                 "feeling fresh.",
+            wraplength=430, style="Hint.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", padx=6, pady=(4, 2))
+
+        self.listbox = tk.Listbox(self, height=4, exportselection=False)
+        self.listbox.grid(row=1, column=0, columnspan=2, sticky="nsew",
+                          padx=(6, 0), pady=4)
+        scroll = ttk.Scrollbar(self, orient="vertical",
+                               command=self.listbox.yview)
+        scroll.grid(row=1, column=2, sticky="ns", pady=4, padx=(0, 6))
+        self.listbox.configure(yscrollcommand=scroll.set)
+        self.listbox.bind("<<ListboxSelect>>", self.on_select)
+
+        tools = ttk.Frame(self)
+        tools.grid(row=2, column=0, columnspan=3, sticky="w",
+                   padx=6, pady=(0, 4))
+        ttk.Button(tools, text="Add line", width=9,
+                   command=self.add).pack(side="left")
+        ttk.Button(tools, text="Delete", width=8,
+                   command=self.remove).pack(side="left", padx=3)
+        ttk.Button(tools, text="↑", width=3,
+                   command=lambda: self.move(-1)).pack(side="left")
+        ttk.Button(tools, text="↓", width=3,
+                   command=lambda: self.move(1)).pack(side="left")
+
+        self.detail = ttk.Frame(self)
+        self.detail.grid(row=3, column=0, columnspan=3, sticky="ew",
+                         padx=6, pady=(0, 6))
+        self.detail.columnconfigure(0, weight=1)
+
+        ttk.Label(self.detail, text="Line text").grid(
+            row=0, column=0, sticky="w")
+        self.text = tk.Text(self.detail, height=3, wrap="word", undo=True,
+                            autoseparators=True, maxundo=-1)
+        self.text.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        self.text.bind("<KeyRelease>", lambda _e: self.commit_current())
+        attach_text_spellcheck(self.text)
+
+        # Both quest dropdowns share one row - there's plenty of width and it
+        # keeps the panel short. Labels size to their text so nothing clips.
+        locks = ttk.Frame(self.detail)
+        locks.grid(row=2, column=0, sticky="w", pady=(0, 2))
+
+        gate_group = ttk.Frame(locks)
+        gate_group.pack(side="left", padx=(0, 24))
+        ttk.Label(gate_group, text="Quest lock").pack(side="left")
+        self.gate = ttk.Combobox(gate_group, width=24)
+        self.gate.pack(side="left", padx=(6, 4))
+        self.gate.bind("<<ComboboxSelected>>", self.on_gate_changed)
+        self.gate.bind("<KeyRelease>", self.on_gate_changed)
+        ttk.Button(gate_group, text="Browse...", width=10,
+                   command=self.browse_gate).pack(side="left")
+
+        override_group = ttk.Frame(locks)
+        override_group.pack(side="left")
+        ttk.Label(override_group, text="Standard greeting after").pack(
+            side="left")
+        self.override = ttk.Combobox(override_group, width=24)
+        self.override.pack(side="left", padx=(6, 4))
+        self.override.bind("<<ComboboxSelected>>", self.on_override_changed)
+        self.override.bind("<KeyRelease>", self.on_override_changed)
+        ttk.Button(override_group, text="Browse...", width=10,
+                   command=self.browse_override).pack(side="left")
+
+        notes = ttk.Frame(self.detail)
+        notes.grid(row=3, column=0, sticky="ew", pady=(0, 4))
+        notes.columnconfigure(0, weight=1)
+        notes.columnconfigure(1, weight=1)
+        self.gate_note = ttk.Label(notes, text="", wraplength=340,
+                                   style="Hint.TLabel", justify="left")
+        self.gate_note.grid(row=0, column=0, sticky="w", padx=(0, 16))
+        self.override_note = ttk.Label(notes, text="", wraplength=340,
+                                       style="Hint.TLabel", justify="left")
+        self.override_note.grid(row=0, column=1, sticky="w")
+
+        self.voice = StringListEditor(
+            self.detail, "Voice lines for this line (optional)",
+            "Played only when this line is the one shown.", height=3,
+            on_change=self.commit_current)
+        self.voice.grid(row=4, column=0, sticky="ew")
+
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+        self.set_current(None)
+
+    def _fire(self):
+        if self.on_change and not self.loading:
+            self.on_change()
+
+    def set_lines(self, lines):
+        self.lines = [dict(line) for line in (lines or [])]
+        for line in self.lines:
+            line["VoiceLineIDs"] = list(line.get("VoiceLineIDs") or [])
+        self.refresh_list()
+        self.set_current(None)
+
+    def get_lines(self):
+        out = []
+        for line in self.lines:
+            gate = line.get("RequiredQuestID", -1)
+            override = line.get("OverrideQuestID", -1)
+            out.append({
+                "Text": line.get("Text", ""),
+                "RequiredQuestID": gate if gate and gate > 0 else -1,
+                "OverrideQuestID": override if override and override > 0 else -1,
+                "VoiceLineIDs": list(line.get("VoiceLineIDs") or []),
+            })
+        return out
+
+    def refresh_quest_choices(self):
+        self.gate["values"] = [NOT_LOCKED_LABEL] + self.app.quest_labels()
+        self.override["values"] = [OVERRIDE_NONE_LABEL] + self.app.quest_labels()
+
+    def label_for(self, line):
+        text = (line.get("Text") or "").strip() or "(no text)"
+        if len(text) > 40:
+            text = text[:37] + "..."
+        tags = []
+        gate = line.get("RequiredQuestID", -1)
+        if gate and gate > 0:
+            tags.append("needs %s" % self.app.quest_label(gate))
+        override = line.get("OverrideQuestID", -1)
+        if override and override > 0:
+            tags.append("greeting after %s" % self.app.quest_label(override))
+        if tags:
+            return "%s   [%s]" % (text, "; ".join(tags))
+        return text
+
+    def refresh_list(self, keep_index=None):
+        self.listbox.delete(0, tk.END)
+        for line in self.lines:
+            self.listbox.insert(tk.END, self.label_for(line))
+        if keep_index is not None and 0 <= keep_index < len(self.lines):
+            self.listbox.selection_clear(0, tk.END)
+            self.listbox.selection_set(keep_index)
+
+    def on_select(self, _event=None):
+        selection = self.listbox.curselection()
+        if selection:
+            self.set_current(selection[0])
+
+    def set_current(self, index):
+        self.refresh_quest_choices()
+        if index is None or index >= len(self.lines):
+            self.current = None
+            self.loading = True
+            self.text.delete("1.0", tk.END)
+            self.gate.set(NOT_LOCKED_LABEL)
+            self.override.set(OVERRIDE_NONE_LABEL)
+            self.voice.set_items([])
+            self.loading = False
+            self._set_detail_enabled(False)
+            self.update_gate_note()
+            self.update_override_note()
+            return
+        self.current = self.lines[index]
+        self.loading = True
+        self.text.delete("1.0", tk.END)
+        self.text.insert("1.0", self.current.get("Text", ""))
+        self.text.edit_reset()
+        gate = self.current.get("RequiredQuestID", -1)
+        self.gate.set(self.app.quest_label(gate)
+                      if gate and gate > 0 else NOT_LOCKED_LABEL)
+        override = self.current.get("OverrideQuestID", -1)
+        self.override.set(self.app.quest_label(override)
+                          if override and override > 0 else OVERRIDE_NONE_LABEL)
+        self.voice.set_items(self.current.get("VoiceLineIDs") or [])
+        self.loading = False
+        self._set_detail_enabled(True)
+        self.update_gate_note()
+        self.update_override_note()
+
+    def _set_detail_enabled(self, enabled):
+        state = "normal" if enabled else "disabled"
+        self.text.configure(state=state)
+        self.gate.configure(state=state)
+        self.override.configure(state=state)
+
+    def add(self):
+        self.lines.append(
+            {"Text": "New line", "RequiredQuestID": -1,
+             "OverrideQuestID": -1, "VoiceLineIDs": []})
+        index = len(self.lines) - 1
+        self.refresh_list(keep_index=index)
+        self.set_current(index)
+        self._fire()
+
+    def remove(self):
+        selection = self.listbox.curselection()
+        if not selection:
+            return
+        del self.lines[selection[0]]
+        self.refresh_list()
+        self.set_current(None)
+        self._fire()
+
+    def move(self, delta):
+        selection = self.listbox.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        target = index + delta
+        if target < 0 or target >= len(self.lines):
+            return
+        self.lines[index], self.lines[target] = \
+            self.lines[target], self.lines[index]
+        self.refresh_list(keep_index=target)
+        self.set_current(target)
+        self._fire()
+
+    def on_gate_changed(self, _event=None):
+        self.update_gate_note()
+        self.commit_current()
+
+    def on_override_changed(self, _event=None):
+        self.update_override_note()
+        self.commit_current()
+
+    def update_gate_note(self):
+        if not self.current:
+            self.gate_note.configure(text="")
+            return
+        text = self.gate.get().strip()
+        if not text or text == NOT_LOCKED_LABEL:
+            self.gate_note.configure(text="Always eligible to be shown.")
+            return
+        quest_id = quest_id_from_label(text, 0)
+        if quest_id <= 0:
+            self.gate_note.configure(
+                text="Not a quest yet - pick one, or choose \"%s\"."
+                     % NOT_LOCKED_LABEL)
+        elif self.app.quest_index and self.app.quest_lookup(quest_id) is None:
+            self.gate_note.configure(
+                text="Quest %d isn't in your quest folder." % quest_id)
+        else:
+            self.gate_note.configure(
+                text="Only shown once quest %d is COMPLETED." % quest_id)
+
+    def update_override_note(self):
+        if not self.current:
+            self.override_note.configure(text="")
+            return
+        text = self.override.get().strip()
+        if not text or text == OVERRIDE_NONE_LABEL:
+            self.override_note.configure(
+                text="Just one of the random lines - doesn't take over.")
+            return
+        quest_id = quest_id_from_label(text, 0)
+        if quest_id <= 0:
+            self.override_note.configure(
+                text="Not a quest yet - pick one, or choose \"%s\"."
+                     % OVERRIDE_NONE_LABEL)
+        elif self.app.quest_index and self.app.quest_lookup(quest_id) is None:
+            self.override_note.configure(
+                text="Quest %d isn't in your quest folder." % quest_id)
+        else:
+            self.override_note.configure(
+                text="Becomes the fixed greeting once quest %d is COMPLETED "
+                     "(highest such quest wins)." % quest_id)
+
+    def _browse_into(self, combo, note_fn, hint):
+        if not self.current:
+            return
+        if not self.app.ensure_quest_folder():
+            return
+        if not self.app.quest_index:
+            messagebox.showinfo(
+                APP_TITLE, "No quest configs found in that folder.",
+                parent=self)
+            return
+        dialog = ChooserDialog(
+            self.app, "Pick a quest", self.app.quest_index, hint)
+        self.wait_window(dialog)
+        if dialog.chosen is None:
+            return
+        combo.set(self.app.quest_label(dialog.chosen))
+        note_fn()
+        self.commit_current()
+
+    def browse_gate(self):
+        self._browse_into(
+            self.gate, self.update_gate_note,
+            "This line only shows once the player has COMPLETED the quest.")
+
+    def browse_override(self):
+        self._browse_into(
+            self.override, self.update_override_note,
+            "Once the player has COMPLETED this quest, this line becomes the "
+            "NPC's standard greeting.")
+
+    def commit_current(self):
+        if self.loading or not self.current:
+            return
+        self.current["Text"] = self.text.get("1.0", "end-1c")
+        gate_text = self.gate.get().strip()
+        if not gate_text or gate_text == NOT_LOCKED_LABEL:
+            self.current["RequiredQuestID"] = -1
+        else:
+            self.current["RequiredQuestID"] = max(
+                1, quest_id_from_label(gate_text, 1))
+        override_text = self.override.get().strip()
+        if not override_text or override_text == OVERRIDE_NONE_LABEL:
+            self.current["OverrideQuestID"] = -1
+        else:
+            self.current["OverrideQuestID"] = max(
+                1, quest_id_from_label(override_text, 1))
+        self.current["VoiceLineIDs"] = self.voice.get_items()
+        index = self.lines.index(self.current)
+        self.listbox.delete(index)
+        self.listbox.insert(index, self.label_for(self.current))
+        self.listbox.selection_set(index)
         self._fire()
 
 
@@ -553,14 +1266,19 @@ class ColorRow(ttk.Frame):
         ttk.Label(self, text="Alpha").grid(row=0, column=3, padx=(10, 2))
         self.alpha = tk.IntVar(value=self.value[0])
         self.slider = ttk.Scale(self, from_=0, to=255, orient="horizontal",
-                                length=130, command=self._alpha_moved)
-        self.slider.set(self.value[0])
+                                length=130)
         self.slider.grid(row=0, column=4)
         self.alpha_label = ttk.Label(self, width=4, text=str(self.value[0]))
         self.alpha_label.grid(row=0, column=5, padx=(4, 0))
 
         self.rgb_label = ttk.Label(self, width=18, style="Hint.TLabel")
         self.rgb_label.grid(row=0, column=6, padx=(8, 0), sticky="w")
+
+        # Attach the handler only after the initial value and the labels it
+        # touches exist, so building the row (which calls set()) can't fire
+        # _alpha_moved before alpha_label is created or mark the editor dirty.
+        self.slider.set(self.value[0])
+        self.slider.configure(command=self._alpha_moved)
 
         self.refresh()
 
@@ -654,7 +1372,11 @@ def validate_tree_dict(data, kind, key, quest_index=None):
         or data.get("NoQuestsTexts") \
         or data.get("NoQuestsBackTexts") \
         or data.get("NoQuestsLeaveTexts") \
-        or data.get("NoQuestsVoiceLineIDs")
+        or data.get("NoQuestsVoiceLineIDs") \
+        or data.get("QuestListBackTexts") \
+        or data.get("OfferBackTexts") \
+        or data.get("InProgressBackTexts") \
+        or data.get("TurnInBackTexts")
     opens_quest_list = False
     for node in nodes:
         for response in (node.get("Responses") or []):
@@ -667,6 +1389,34 @@ def validate_tree_dict(data, kind, key, quest_index=None):
 
     for node in nodes:
         label = "Node %s" % node.get("ID")
+
+        speaker_lines = node.get("SpeakerLines") or []
+        if speaker_lines:
+            has_open_line = bool((node.get("SpeakerText") or "").strip()) or \
+                any(not (ln.get("RequiredQuestID", -1) or 0) > 0
+                    for ln in speaker_lines)
+            if not has_open_line:
+                issues.append(
+                    "%s has extra spoken lines but every one is quest-locked "
+                    "and there's no main line, so a player who hasn't "
+                    "completed those quests sees a blank line." % label)
+            for line in speaker_lines:
+                if not (line.get("Text") or "").strip():
+                    warnings.append(
+                        "%s has an extra spoken line with no text." % label)
+                gate = line.get("RequiredQuestID", -1)
+                if gate and gate > 0 and quest_index and \
+                        not any(q["id"] == gate for q in quest_index):
+                    warnings.append(
+                        "%s has an extra line locked to quest %d, which isn't "
+                        "in your quest folder." % (label, gate))
+                override = line.get("OverrideQuestID", -1)
+                if override and override > 0 and quest_index and \
+                        not any(q["id"] == override for q in quest_index):
+                    warnings.append(
+                        "%s has an extra line set to override after quest %d, "
+                        "which isn't in your quest folder." % (label, override))
+
         responses = node.get("Responses") or []
         if not responses:
             warnings.append(
@@ -774,7 +1524,9 @@ def validate_quest_dict(data):
     fields = ["AcceptTexts", "DeclineTexts", "TurnInTexts",
               "NotYetTexts", "InProgressTexts",
               "QuestListTexts", "NoQuestsTexts",
-              "NoQuestsBackTexts", "NoQuestsLeaveTexts"]
+              "NoQuestsBackTexts", "NoQuestsLeaveTexts",
+              "QuestListBackTexts", "OfferBackTexts",
+              "InProgressBackTexts", "TurnInBackTexts"]
     for quest in quests:
         if not any(quest.get(f) for f in fields) \
                 and not quest.get("RewardSelectText"):
@@ -987,7 +1739,8 @@ class DialogueTab(ttk.Frame):
         left.pack(side="left", fill="both", expand=True, padx=(0, 6))
         right.pack(side="left", fill="both", expand=True)
 
-        who = ttk.LabelFrame(left, text="Who is this conversation for?")
+        who = ttk.LabelFrame(left, text="Who is this conversation for?",
+                             style="Section.TLabelframe")
         who.pack(fill="x")
 
         for index, (label, value) in enumerate([
@@ -1010,6 +1763,11 @@ class DialogueTab(ttk.Frame):
         self.pick_npc_button = ttk.Button(key_row, text="Pick NPC...",
                                           width=12, command=self.browse_npcs)
         self.pick_npc_button.pack(side="left", padx=6)
+        # Shows whose conversation this is once an ID is typed, e.g. "Steve",
+        # so you don't have to cross-check the NPC config to know who you're on.
+        self.npc_name_label = ttk.Label(key_row, text="",
+                                        style="Accent.TLabel")
+        self.npc_name_label.pack(side="left", padx=(8, 0))
 
         self.key_hint = ttk.Label(who, text="", wraplength=340,
                                   style="Hint.TLabel")
@@ -1028,7 +1786,8 @@ class DialogueTab(ttk.Frame):
                                sticky="w", padx=6, pady=(6, 8))
 
         self.trader_frame = ttk.LabelFrame(
-            left, text="Narrow down which trader (optional)")
+            left, text="Narrow down which trader (optional)",
+            style="Section.TLabelframe")
         self.trader_extra = StringListEditor(
             self.trader_frame, "Entity class names",
             "e.g. ExpansionTraderAIDenis - matches every trader using "
@@ -1078,25 +1837,63 @@ class DialogueTab(ttk.Frame):
         parent = scroll.inner
 
         ttk.Label(parent,
-                  text="All optional - leave it empty and the mod uses its "
-                       "built-in wording. Used for every quest this NPC has, "
-                       "unless a finished quest overrides it on the Quest "
-                       "wording tab.",
+                  text="The NPC-wide defaults for every quest they have, "
+                       "grouped by the in-game screen each shows on. A finished "
+                       "quest can override any of these per quest on the Quest "
+                       "wording tab. All optional - leave a box empty and the "
+                       "mod uses its built-in wording.",
                   wraplength=700, style="Hint.TLabel").pack(
             anchor="w", padx=6, pady=(6, 2))
 
-        prompt_box = ttk.LabelFrame(
-            parent, text="When they have quests to offer  (optional)")
-        prompt_box.pack(fill="x", padx=4, pady=(4, 0))
+        back_hint = ("One button per line, each returns to the conversation. "
+                     "Blank shows no back button on this screen.")
+
+        list_section = CollapsibleSection(
+            parent, "Quest list screen  (optional)", expanded=True)
+        list_section.pack(fill="x", padx=4, pady=(4, 4))
+        list_box = list_section.content()
         self.quest_prompt = StringListEditor(
-            prompt_box, "Line above their quest list  (NPC says)",
+            list_box, "Line above their quest list  (NPC says)",
             "One line picked at random. Blank uses \"What do you need "
             "done?\"", height=4, on_change=self.mark_dirty)
-        self.quest_prompt.pack(fill="x", padx=6, pady=(6, 6))
+        self.quest_prompt.pack(fill="x", padx=6, pady=(6, 4))
+        self.quest_list_back = StringListEditor(
+            list_box, "Back to the conversation  (Player says)",
+            back_hint, height=3, on_change=self.mark_dirty)
+        self.quest_list_back.pack(fill="x", padx=6, pady=(0, 6))
 
-        none_box = ttk.LabelFrame(
-            parent, text="When they have no quests  (optional)")
-        none_box.pack(fill="x", padx=4, pady=(8, 6))
+        # The offer / in-progress / turn-in wording itself is written per quest
+        # on the Quest wording tab; only the back buttons are NPC-wide here.
+        offer_section = CollapsibleSection(parent, "Offer screen  (optional)")
+        offer_section.pack(fill="x", padx=4, pady=(0, 4))
+        offer_box = offer_section.content()
+        self.offer_back = StringListEditor(
+            offer_box, "Back to the conversation  (Player says)",
+            back_hint, height=3, on_change=self.mark_dirty)
+        self.offer_back.pack(fill="x", padx=6, pady=(6, 6))
+
+        progress_section = CollapsibleSection(
+            parent, "In-progress screen  (optional)")
+        progress_section.pack(fill="x", padx=4, pady=(0, 4))
+        progress_box = progress_section.content()
+        self.in_progress_back = StringListEditor(
+            progress_box, "Back to the conversation  (Player says)",
+            back_hint, height=3, on_change=self.mark_dirty)
+        self.in_progress_back.pack(fill="x", padx=6, pady=(6, 6))
+
+        turnin_section = CollapsibleSection(
+            parent, "Turn-in screen  (optional)")
+        turnin_section.pack(fill="x", padx=4, pady=(0, 4))
+        turnin_box = turnin_section.content()
+        self.turn_in_back = StringListEditor(
+            turnin_box, "Back to the conversation  (Player says)",
+            back_hint, height=3, on_change=self.mark_dirty)
+        self.turn_in_back.pack(fill="x", padx=6, pady=(6, 6))
+
+        none_section = CollapsibleSection(
+            parent, "No-quests screen  (optional)")
+        none_section.pack(fill="x", padx=4, pady=(0, 4))
+        none_box = none_section.content()
 
         self.no_quests_text = StringListEditor(
             none_box, "Line they say  (NPC says)",
@@ -1105,19 +1902,19 @@ class DialogueTab(ttk.Frame):
         self.no_quests_text.pack(fill="x", padx=6, pady=(6, 0))
 
         self.no_quests_back = StringListEditor(
-            none_box, "Buttons back to the conversation  (Player says)",
+            none_box, "Back to the conversation  (Player says)",
             "One button per line. Blank still gives players a Back button.",
-            height=4, on_change=self.mark_dirty)
+            height=3, on_change=self.mark_dirty)
         self.no_quests_back.pack(fill="x", padx=6, pady=(6, 0))
 
         self.no_quests_leave = StringListEditor(
             none_box, "Buttons that end the chat  (Player says)",
-            "One button per line.", height=4, on_change=self.mark_dirty)
+            "One button per line.", height=3, on_change=self.mark_dirty)
         self.no_quests_leave.pack(fill="x", padx=6, pady=(6, 0))
 
         self.no_quests_voice = StringListEditor(
             none_box, "Voice lines (optional)",
-            "One picked at random.", height=4,
+            "One picked at random.", height=3,
             on_change=self.mark_dirty)
         self.no_quests_voice.pack(fill="x", padx=6, pady=(6, 6))
 
@@ -1139,7 +1936,8 @@ class DialogueTab(ttk.Frame):
         self._build_map(map_pane)
 
     def _build_outline(self, parent):
-        box = ttk.LabelFrame(parent, text="Conversation outline")
+        box = ttk.LabelFrame(parent, text="Conversation outline",
+                             style="Section.TLabelframe")
         box.pack(fill="both", expand=True)
 
         self.outline = ttk.Treeview(box, columns=("target",),
@@ -1155,6 +1953,7 @@ class DialogueTab(ttk.Frame):
         scroll.pack(side="left", fill="y", pady=6, padx=(0, 6))
         self.outline.configure(yscrollcommand=scroll.set)
         self.outline.bind("<<TreeviewSelect>>", self.on_outline_select)
+        self.outline.bind("<Button-3>", self._outline_right_click)
 
         tools = ttk.Frame(parent)
         tools.pack(fill="x", pady=(4, 0))
@@ -1178,7 +1977,8 @@ class DialogueTab(ttk.Frame):
         scroll.pack(fill="both", expand=True)
         parent = scroll.inner
 
-        node_box = ttk.LabelFrame(parent, text="This node")
+        node_box = ttk.LabelFrame(parent, text="This node",
+                                  style="Section.TLabelframe")
         node_box.pack(fill="x")
 
         row = ttk.Frame(node_box)
@@ -1197,17 +1997,36 @@ class DialogueTab(ttk.Frame):
 
         ttk.Label(node_box, text="What the NPC says here:").pack(
             anchor="w", padx=6)
-        self.speaker_text = tk.Text(node_box, height=4, wrap="word")
+        self.speaker_text = tk.Text(node_box, height=4, wrap="word",
+                                    undo=True, autoseparators=True,
+                                    maxundo=-1)
         self.speaker_text.pack(fill="x", padx=6, pady=(2, 6))
         self.speaker_text.bind("<KeyRelease>", lambda _e: self.commit_speaker())
+        attach_text_spellcheck(self.speaker_text)
 
+        # Optional / advanced node bits stay folded so a basic node is just an
+        # ID, a type and a line of speech.
+        voice_section = CollapsibleSection(
+            node_box, "Voice lines for this node  (optional)")
+        voice_section.pack(fill="x", padx=6, pady=(0, 4))
         self.node_voice = StringListEditor(
-            node_box, "Voice lines for this node (optional)",
-            "One picked at random when this node is shown.", height=3,
-            on_change=self.commit_node_voice)
-        self.node_voice.pack(fill="x", padx=6, pady=(0, 6))
+            voice_section.content(), "",
+            "One picked at random when this node is shown. Used with the main "
+            "line above, or as a fallback for any extra line without its own.",
+            height=3, on_change=self.commit_node_voice)
+        self.node_voice.pack(fill="x", padx=4, pady=(2, 6))
 
-        editor = ttk.LabelFrame(parent, text="Selected player option")
+        extra_section = CollapsibleSection(
+            node_box, "Extra spoken lines with quest locking  (optional)")
+        extra_section.pack(fill="x", padx=6, pady=(0, 6))
+        self.speaker_lines = SpeakerLinesEditor(
+            extra_section.content(), self.app,
+            on_change=self.commit_speaker_lines)
+        self.speaker_lines.configure(text="")
+        self.speaker_lines.pack(fill="x", padx=4, pady=(2, 6))
+
+        editor = ttk.LabelFrame(parent, text="Selected player option",
+                                style="Section.TLabelframe")
         editor.pack(fill="both", expand=True, pady=(6, 0))
 
         tools = ttk.Frame(editor)
@@ -1236,6 +2055,8 @@ class DialogueTab(ttk.Frame):
         self.response_text.grid(row=0, column=1, sticky="ew", padx=4, pady=3)
         self.response_text.bind("<KeyRelease>",
                                 lambda _e: self.commit_response())
+        add_entry_undo(self.response_text)
+        attach_entry_spellcheck(self.response_text)
 
         ttk.Label(fields, text="What it does").grid(row=1, column=0,
                                                     sticky="w", pady=3)
@@ -1265,28 +2086,29 @@ class DialogueTab(ttk.Frame):
         ttk.Button(next_row, text="Jump to", width=9,
                    command=self.jump_to_next).pack(side="left", padx=6)
 
-        self.gate_enabled = tk.BooleanVar(value=False)
-        ttk.Checkbutton(fields, text="Only after quest",
-                        variable=self.gate_enabled,
-                        command=self.on_gate_toggled).grid(
-            row=4, column=0, sticky="w", pady=3)
-        gate_row = ttk.Frame(fields)
-        gate_row.grid(row=4, column=1, sticky="w", padx=4, pady=3)
+        # Gating is advanced and rarely used, so it folds away under the core
+        # button text / action / next-node fields.
+        gate_section = CollapsibleSection(
+            editor, "Show only after a quest completes  (optional)")
+        gate_section.pack(fill="x", padx=6, pady=(2, 6))
+        gate_box = gate_section.content()
+        gate_row = ttk.Frame(gate_box)
+        gate_row.pack(fill="x", padx=6, pady=(4, 2))
+        ttk.Label(gate_row, text="Quest lock").pack(side="left")
         self.gate_quest = ttk.Combobox(gate_row, width=34)
-        self.gate_quest.pack(side="left")
-        self.gate_quest.bind("<<ComboboxSelected>>",
-                             lambda _e: self.commit_response())
-        self.gate_quest.bind("<KeyRelease>",
-                             lambda _e: self.commit_response())
+        self.gate_quest.pack(side="left", padx=(4, 0))
+        self.gate_quest.bind("<<ComboboxSelected>>", self.on_gate_changed)
+        self.gate_quest.bind("<KeyRelease>", self.on_gate_changed)
         ttk.Button(gate_row, text="Browse quests...", width=16,
                    command=self.browse_quests).pack(side="left", padx=6)
 
-        self.gate_note = ttk.Label(fields, text="", wraplength=430,
+        self.gate_note = ttk.Label(gate_box, text="", wraplength=430,
                                    style="Hint.TLabel")
-        self.gate_note.grid(row=5, column=1, sticky="w", padx=4)
+        self.gate_note.pack(anchor="w", padx=6, pady=(0, 4))
 
     def _build_map(self, parent):
-        box = ttk.LabelFrame(parent, text="Branch map")
+        box = ttk.LabelFrame(parent, text="Branch map",
+                             style="Section.TLabelframe")
         box.pack(fill="both", expand=True)
 
         wrap = ttk.Frame(box)
@@ -1321,7 +2143,7 @@ class DialogueTab(ttk.Frame):
         self.app.mark_editor_dirty("Dialogue")
 
     def preview_scene(self):
-        speaker = (self.file_name.get() or "NPC").replace(".json", "")
+        speaker = self.speaker_label()
         node = self.current_node
         if not node:
             return PreviewScene(
@@ -1339,9 +2161,41 @@ class DialogueTab(ttk.Frame):
         note = ""
         if node.get("Type") and node.get("Type") != "STANDARD":
             note = "Node type: %s" % node.get("Type")
+
+        # Show the main line, or the first extra line if there's no main one,
+        # and flag that the mod picks one of several at random.
+        line = node.get("SpeakerText") or ""
+        extra = node.get("SpeakerLines") or []
+        if extra:
+            if not line:
+                line = (extra[0].get("Text") or "")
+            pool = (1 if node.get("SpeakerText") else 0) + len(extra)
+            variation = "Varies: one of %d lines picked at random" % pool
+            gated = sum(1 for ln in extra
+                        if (ln.get("RequiredQuestID", -1) or 0) > 0)
+            if gated:
+                variation += " (%d quest-locked)" % gated
+            overrides = sum(1 for ln in extra
+                            if (ln.get("OverrideQuestID", -1) or 0) > 0)
+            if overrides:
+                variation += (", %d take over as the greeting once their "
+                              "quest is done" % overrides)
+            note = (note + "   •   " + variation) if note else variation
         return PreviewScene(
             "Conversation - node %s" % node.get("ID"), speaker,
-            node.get("SpeakerText") or "", buttons, note)
+            line, buttons, note)
+
+    def speaker_label(self):
+        """Who is talking, for the preview header - the NPC's name when we can
+        resolve it, so it reads 'NPC 2 "Steve"' instead of a file name."""
+        kind = self.target_kind.get()
+        key = self.folder_key.get().strip()
+        if kind == "NPC" and key:
+            return self.app.npc_speaker_label(safe_int(key, 0)) \
+                or ("NPC %s" % key)
+        if kind == "TRADER" and key:
+            return "Trader %s" % key
+        return (self.file_name.get() or "NPC").replace(".json", "")
 
     def browse_npcs(self):
         """Pick a quest NPC by name instead of by ID."""
@@ -1401,7 +2255,8 @@ class DialogueTab(ttk.Frame):
         key = self.folder_key.get().strip()
         if kind == "NPC":
             folder = "NPC_%s" % (key or "?")
-            who = "quest NPC %s" % (key or "?")
+            label = self.app.npc_speaker_label(safe_int(key, 0)) if key else ""
+            who = label or ("quest NPC %s" % (key or "?"))
         elif kind == "TRADER":
             folder = "Trader_%s" % (key or "?")
             who = "trader %s" % (key or "?")
@@ -1415,6 +2270,17 @@ class DialogueTab(ttk.Frame):
         self.path_preview.configure(text="Saves to: " + self.preview_path)
         self.summary.configure(
             text="%s   \u2192   Dialogues\\%s\\%s" % (who, folder, name))
+
+        if hasattr(self, "npc_name_label"):
+            npc_name = ""
+            if kind == "NPC" and key:
+                npc_name = self.app.npc_name(safe_int(key, 0))
+            if npc_name:
+                self.npc_name_label.configure(text='\u2190 "%s"' % npc_name)
+            elif kind == "NPC" and key and safe_int(key, 0) > 0:
+                self.npc_name_label.configure(text="(name not in quest folder)")
+            else:
+                self.npc_name_label.configure(text="")
 
     def output_path(self):
         self.update_path_preview()
@@ -1450,6 +2316,10 @@ class DialogueTab(ttk.Frame):
         self.tree["NoQuestsBackTexts"] = self.no_quests_back.get_items()
         self.tree["NoQuestsLeaveTexts"] = self.no_quests_leave.get_items()
         self.tree["NoQuestsVoiceLineIDs"] = self.no_quests_voice.get_items()
+        self.tree["QuestListBackTexts"] = self.quest_list_back.get_items()
+        self.tree["OfferBackTexts"] = self.offer_back.get_items()
+        self.tree["InProgressBackTexts"] = self.in_progress_back.get_items()
+        self.tree["TurnInBackTexts"] = self.turn_in_back.get_items()
         self.update_path_preview()
 
     def refresh_all(self):
@@ -1461,6 +2331,10 @@ class DialogueTab(ttk.Frame):
         self.no_quests_back.set_items(self.tree.get("NoQuestsBackTexts"))
         self.no_quests_leave.set_items(self.tree.get("NoQuestsLeaveTexts"))
         self.no_quests_voice.set_items(self.tree.get("NoQuestsVoiceLineIDs"))
+        self.quest_list_back.set_items(self.tree.get("QuestListBackTexts"))
+        self.offer_back.set_items(self.tree.get("OfferBackTexts"))
+        self.in_progress_back.set_items(self.tree.get("InProgressBackTexts"))
+        self.turn_in_back.set_items(self.tree.get("TurnInBackTexts"))
         self.trader_extra.set_items(self.tree.get("TraderClassNames"))
         self.trader_positions.set_items(self.tree.get("TraderPositions"))
         self.radius.delete(0, tk.END)
@@ -1582,6 +2456,44 @@ class DialogueTab(ttk.Frame):
         self.load_from_iid(iid)
         self.refresh_map()
 
+    def _outline_right_click(self, event):
+        """Edit or delete whatever outline row was right-clicked, so deleting a
+        node vs an option is one menu on the thing itself - not two buttons in
+        different corners that are easy to mix up."""
+        iid = self.outline.identify_row(event.y)
+        if not iid:
+            return
+        # Select and load the clicked row first, so the menu's actions and the
+        # editor both operate on it.
+        self.outline.selection_set(iid)
+        if iid != self._loaded_iid:
+            self._loaded_iid = iid
+            self.load_from_iid(iid)
+            self.refresh_map()
+
+        menu = tk.Menu(self, tearoff=0)
+        if iid.startswith("n"):
+            menu.add_command(label="Edit this node",
+                             command=lambda: self._outline_edit(iid))
+            menu.add_separator()
+            menu.add_command(label="Delete this node", command=self.delete_node)
+        else:
+            menu.add_command(label="Edit this option",
+                             command=lambda: self._outline_edit(iid))
+            menu.add_separator()
+            menu.add_command(label="Delete this option",
+                             command=self.delete_response)
+        _popup_menu(menu, event)
+
+    def _outline_edit(self, iid):
+        """The row is already loaded into the editor; drop the cursor into the
+        main field for that row so 'Edit' goes straight to typing."""
+        if iid.startswith("n"):
+            self.speaker_text.focus_set()
+        else:
+            self.response_text.focus_set()
+            self.response_text.icursor(tk.END)
+
     # --- node editing
 
     def select_node(self, index):
@@ -1594,7 +2506,15 @@ class DialogueTab(ttk.Frame):
         self.speaker_text.insert("1.0", self.current_node.get(
             "SpeakerText", ""))
         self.node_voice.set_items(self.current_node.get("VoiceLineIDs"))
+        self.speaker_lines.set_lines(self.current_node.get("SpeakerLines"))
         self.loading = False
+
+    def commit_speaker_lines(self):
+        if self.loading or not self.current_node:
+            return
+        self.current_node["SpeakerLines"] = self.speaker_lines.get_lines()
+        self.refresh_map()
+        self.mark_dirty()
 
     def on_root_changed(self, _event=None):
         self.tree["RootNodeID"] = safe_int(self.root_node.get(), 1)
@@ -1731,7 +2651,7 @@ class DialogueTab(ttk.Frame):
         self.response_text.delete(0, tk.END)
         self.action_type.set("")
         self.next_node.set("")
-        self.gate_enabled.set(False)
+        self.gate_quest.set(NOT_LOCKED_LABEL)
         self.gate_note.configure(text="")
         self.action_hint.configure(
             text="Pick an option in the outline, or add one.")
@@ -1765,26 +2685,38 @@ class DialogueTab(ttk.Frame):
                            else "(end conversation)")
 
         gate = response.get("RequiredQuestID", -1)
-        self.gate_enabled.set(bool(gate and gate > 0))
         self.refresh_quest_choices()
-        self.set_gate_value(gate if gate and gate > 0 else 1)
+        self.set_gate_value(gate)
         self.loading = False
         self.update_action_state()
 
     def refresh_quest_choices(self):
-        self.gate_quest["values"] = self.app.quest_labels()
+        self.gate_quest["values"] = [NOT_LOCKED_LABEL] + self.app.quest_labels()
         self.update_gate_note()
+        if hasattr(self, "speaker_lines"):
+            self.speaker_lines.refresh_quest_choices()
 
     def update_gate_note(self):
-        if not self.gate_enabled.get():
+        if not self.current_response:
             self.gate_note.configure(text="")
+            return
+        text = self.gate_quest.get().strip()
+        if not text or text == NOT_LOCKED_LABEL:
+            self.gate_note.configure(
+                text="This option is always available.")
+            return
+        quest_id = quest_id_from_label(text, 0)
+        if quest_id <= 0:
+            self.gate_note.configure(
+                text="Not a quest yet - pick one from the list, or choose "
+                     "\"%s\"." % NOT_LOCKED_LABEL)
             return
         if not self.app.quest_index:
             self.gate_note.configure(
-                text="No quest folder set - type a raw quest ID, or use "
-                     "Browse quests... to point at your Expansion quests.")
+                text="No quest folder set - using raw quest ID %d. Point "
+                     "Settings at your Expansion quests to pick by name."
+                     % quest_id)
             return
-        quest_id = quest_id_from_label(self.gate_quest.get(), 0)
         if self.app.quest_lookup(quest_id) is None:
             self.gate_note.configure(
                 text="Quest %d isn't in your quest folder - double-check it."
@@ -1811,30 +2743,30 @@ class DialogueTab(ttk.Frame):
         self.wait_window(dialog)
         if dialog.chosen is None:
             return
-        self.gate_enabled.set(True)
-        self.update_action_state()
         self.set_gate_value(dialog.chosen)
+        self.update_gate_note()
         self.commit_response()
 
     def set_gate_value(self, quest_id):
-        self.gate_quest.delete(0, tk.END)
-        self.gate_quest.insert(0, self.app.quest_label(quest_id))
+        if quest_id and quest_id > 0:
+            self.gate_quest.set(self.app.quest_label(quest_id))
+        else:
+            self.gate_quest.set(NOT_LOCKED_LABEL)
 
     def update_action_state(self):
         action = self.action_type.get()
         self.action_hint.configure(text=ACTION_HELP.get(action, ""))
         self.next_node.configure(
             state="readonly" if action == "NONE" else "disabled")
-        self.gate_quest.configure(
-            state="normal" if self.gate_enabled.get() else "disabled")
+        self.gate_quest.configure(state="normal")
         self.update_gate_note()
 
     def on_action_changed(self, _event=None):
         self.update_action_state()
         self.commit_response()
 
-    def on_gate_toggled(self):
-        self.update_action_state()
+    def on_gate_changed(self, _event=None):
+        self.update_gate_note()
         self.commit_response()
 
     def commit_response(self):
@@ -1849,11 +2781,12 @@ class DialogueTab(ttk.Frame):
                 else safe_int(target, -1)
         else:
             response["NextNodeID"] = -1
-        if self.gate_enabled.get():
-            response["RequiredQuestID"] = max(
-                1, quest_id_from_label(self.gate_quest.get(), 1))
-        else:
+        gate_text = self.gate_quest.get().strip()
+        if not gate_text or gate_text == NOT_LOCKED_LABEL:
             response["RequiredQuestID"] = -1
+        else:
+            response["RequiredQuestID"] = max(
+                1, quest_id_from_label(gate_text, 1))
         self.refresh_outline(reload_editors=False)
         self.refresh_map()
         self.mark_dirty()
@@ -1863,12 +2796,23 @@ class DialogueTab(ttk.Frame):
             messagebox.showinfo(
                 APP_TITLE, "Select a node first.", parent=self)
             return
-        self.current_node.setdefault("Responses", []).append(new_response())
-        index = len(self.current_node["Responses"]) - 1
-        self.current_response = self.current_node["Responses"][index]
-        self.refresh_outline(keep_response=index)
+        response = new_response()
+        # With no option selected the Button text box is a staging field for a
+        # new option, so a label typed there names it. (With an option selected
+        # the box is editing that option, so Add just makes a fresh default.)
+        typed = self.response_text.get().strip()
+        if typed and self.current_response is None:
+            response["Text"] = typed
+        self.current_node.setdefault("Responses", []).append(response)
+        # Deselect and clear so the box is ready to stage the NEXT option. If we
+        # left the new option selected, the box would stay bound to it and the
+        # next thing typed would overwrite it instead of starting a new one.
+        # Click the option in the outline to set its action or next node.
+        self.current_response = None
+        self.refresh_outline(keep_response=None)
         self.refresh_map()
         self.mark_dirty()
+        self.response_text.focus_set()
 
     def duplicate_response(self):
         if not self.current_response:
@@ -2122,6 +3066,12 @@ class DialogueTab(ttk.Frame):
             self.tree.get("NoQuestsLeaveTexts", []))
         out["NoQuestsVoiceLineIDs"] = list(
             self.tree.get("NoQuestsVoiceLineIDs", []))
+        out["QuestListBackTexts"] = list(
+            self.tree.get("QuestListBackTexts", []))
+        out["OfferBackTexts"] = list(self.tree.get("OfferBackTexts", []))
+        out["InProgressBackTexts"] = list(
+            self.tree.get("InProgressBackTexts", []))
+        out["TurnInBackTexts"] = list(self.tree.get("TurnInBackTexts", []))
 
         nodes = []
         for node in self.tree["Nodes"]:
@@ -2132,6 +3082,22 @@ class DialogueTab(ttk.Frame):
                 "VoiceLineIDs": list(node.get("VoiceLineIDs", [])),
                 "Responses": [],
             }
+            speaker_lines = []
+            for line in (node.get("SpeakerLines") or []):
+                text = line.get("Text", "")
+                gate = line.get("RequiredQuestID", -1)
+                override = line.get("OverrideQuestID", -1)
+                speaker_lines.append({
+                    "Text": text,
+                    "RequiredQuestID": gate if gate and gate > 0 else -1,
+                    "OverrideQuestID": override if override and override > 0
+                    else -1,
+                    "VoiceLineIDs": list(line.get("VoiceLineIDs") or []),
+                })
+            # Only written when present, so untouched files stay byte-identical
+            # and older mod builds ignore what they never see.
+            if speaker_lines:
+                entry["SpeakerLines"] = speaker_lines
             for response in node.get("Responses", []):
                 action = response.get("ActionType", "NONE") or "NONE"
                 gate = response.get("RequiredQuestID", -1)
@@ -2159,6 +3125,17 @@ class DialogueTab(ttk.Frame):
                 "SpeakerText": n.get("SpeakerText", ""),
                 "VoiceLineIDs": list(n.get("VoiceLineIDs") or []),
                 "Responses": [dict(r) for r in (n.get("Responses") or [])],
+                "SpeakerLines": [
+                    {
+                        "Text": line.get("Text", ""),
+                        "RequiredQuestID": safe_int(
+                            line.get("RequiredQuestID", -1), -1),
+                        "OverrideQuestID": safe_int(
+                            line.get("OverrideQuestID", -1), -1),
+                        "VoiceLineIDs": list(line.get("VoiceLineIDs") or []),
+                    }
+                    for line in (n.get("SpeakerLines") or [])
+                ],
             }
             for n in nodes
         ] or [new_node(1)]
@@ -2198,33 +3175,61 @@ class DialogueTab(ttk.Frame):
 
 class QuestTextTab(ttk.Frame):
 
-    FIELDS = [
-        ("AcceptTexts", "Accept  (Player says)",
-         "One button per line."),
-        ("DeclineTexts", "Turn it down  (Player says)",
-         "One button per line."),
-        ("InProgressTexts", "While it's running  (Player says)",
-         "One button per line."),
-        ("TurnInTexts", "Hand it in  (Player says)",
-         "One button per line."),
-        ("NotYetTexts", "Not finished yet  (Player says)",
-         "One button per line."),
+    BACK_HINT = ("One button per line, each returns to the conversation. "
+                 "Blank shows no back button on this screen.")
+
+    # Player-facing screens, grouped so one box = one in-game screen. Each
+    # screen carries its own "back to the conversation" wording.
+    SCREEN_GROUPS = [
+        ("Offer screen  —  quest not started", [
+            ("AcceptTexts", "Accept  (Player says)",
+             "One button per line."),
+            ("DeclineTexts", "Turn it down  (Player says)",
+             "One button per line."),
+            ("OfferBackTexts", "Back to the conversation  (Player says)",
+             BACK_HINT),
+        ]),
+        ("In-progress screen  —  quest running", [
+            ("InProgressTexts", "While it's running  (Player says)",
+             "One button per line."),
+            ("InProgressBackTexts", "Back to the conversation  (Player says)",
+             BACK_HINT),
+        ]),
+        ("Turn-in screen  —  ready to hand in", [
+            ("TurnInTexts", "Hand it in  (Player says)",
+             "One button per line."),
+            ("NotYetTexts", "Not finished yet  (Player says)",
+             "One button per line."),
+            ("TurnInBackTexts", "Back to the conversation  (Player says)",
+             BACK_HINT),
+        ]),
     ]
 
-    NO_QUEST_FIELDS = [
-        ("QuestListTexts", "Their quest list greeting from now on  (NPC says)",
-         "One line picked at random."),
-        ("NoQuestsTexts", "What they say with nothing left  (NPC says)",
-         "One line picked at random."),
-        ("NoQuestsBackTexts", "Buttons back to the conversation  (Player says)",
-         "One button per line. Shown with the line above."),
-        ("NoQuestsLeaveTexts", "Buttons that end the chat  (Player says)",
-         "One button per line. Shown with the line above."),
+    # Screens shown once this quest is completed - these override the NPC's
+    # Quest talk defaults.
+    COMPLETED_GROUPS = [
+        ("Quest list greeting  —  once this quest is completed", [
+            ("QuestListTexts", "Line above their quest list  (NPC says)",
+             "One line picked at random."),
+            ("QuestListBackTexts", "Back to the conversation  (Player says)",
+             BACK_HINT),
+        ]),
+        ("Nothing-left screen  —  once this quest is completed", [
+            ("NoQuestsTexts", "What they say with nothing left  (NPC says)",
+             "One line picked at random."),
+            ("NoQuestsLeaveTexts", "Buttons that end the chat  (Player says)",
+             "One button per line."),
+            ("NoQuestsBackTexts", "Back to the conversation  (Player says)",
+             "One button per line. Blank still gives a Back button."),
+        ]),
     ]
 
     @property
     def all_list_fields(self):
-        return list(self.FIELDS) + list(self.NO_QUEST_FIELDS)
+        fields = []
+        for _title, specs in self.SCREEN_GROUPS + self.COMPLETED_GROUPS:
+            fields.extend(specs)
+        return fields
 
     def __init__(self, master, app):
         ttk.Frame.__init__(self, master)
@@ -2284,22 +3289,39 @@ class QuestTextTab(ttk.Frame):
         ttk.Button(id_row, text="Browse quests...", width=16,
                    command=self.browse_quests).pack(side="left")
 
-        grid = ttk.Frame(right)
-        grid.pack(fill="both", expand=True)
-        self.editors = {}
-        for index, (key, label, hint) in enumerate(self.FIELDS):
-            editor = StringListEditor(
-                grid, label, hint, height=4, on_change=self.commit,
-                on_focus=lambda k=key: self.set_focus_key(k))
-            editor.grid(row=index // 2, column=index % 2,
-                        sticky="nsew", padx=4, pady=4)
-            self.editors[key] = editor
-        grid.columnconfigure(0, weight=1)
-        grid.columnconfigure(1, weight=1)
+        # Whose quest this wording is for, so you can tell at a glance which
+        # NPC you're writing lines for.
+        self.quest_npc = ttk.Label(right, text="", style="Accent.TLabel")
+        self.quest_npc.pack(anchor="w", pady=(0, 4))
 
-        reward = ttk.LabelFrame(
-            right, text="Above the reward picker  (NPC says, optional)")
-        reward.pack(fill="x", pady=6)
+        # The two description lines the mod actually shows to players: line 1
+        # on offer (the giver) and line 3 on turn-in (the turn-in NPC). Line 2
+        # is only shown mid-quest and the mod overrides it, so it's left out.
+        # Both live in the Expansion quest file and are editable in place.
+        self._desc_entry = None
+        self.desc_box = ttk.LabelFrame(
+            right, text="Preview from Expansion quest file",
+            style="Section.TLabelframe")
+        self.desc_box.pack(fill="x", padx=2, pady=(0, 8))
+        self.desc_editors = [
+            self._build_desc_editor(
+                self.desc_box, "On offer", 0, "giver", "desc"),
+            self._build_desc_editor(
+                self.desc_box, "On turn-in", 2, "turnin", "desc_turnin"),
+        ]
+
+        self.editors = {}
+
+        # One collapsible section per in-game screen, in the order a quest
+        # moves through them. The first (offer) opens by default; the rest stay
+        # tucked away so the tab isn't a wall of fields.
+        for i, (title, specs) in enumerate(self.SCREEN_GROUPS):
+            self._build_screen_box(right, title, specs, expanded=(i == 0))
+
+        reward_section = CollapsibleSection(
+            right, "Reward picker  (NPC says, optional)", expanded=False)
+        reward_section.pack(fill="x", padx=2, pady=(0, 4))
+        reward = reward_section.content()
         ttk.Label(reward,
                   text="Only used by quests that let the player pick a "
                        "reward.",
@@ -2308,34 +3330,256 @@ class QuestTextTab(ttk.Frame):
         self.reward_text = ttk.Entry(reward)
         self.reward_text.pack(fill="x", padx=6, pady=6)
         self.reward_text.bind("<KeyRelease>", lambda _e: self.commit())
+        add_entry_undo(self.reward_text)
+        attach_entry_spellcheck(self.reward_text)
         self.reward_text.bind(
             "<FocusIn>", lambda _e: self.set_focus_key("RewardSelectText"),
             add="+")
 
-        no_quests = ttk.LabelFrame(
-            right, text="Once this quest is completed  (optional)")
-        no_quests.pack(fill="x", pady=6)
-        ttk.Label(no_quests,
-                  text="Not while it is available - these start the moment "
-                       "it is turned in, and last until the player completes "
-                       "a higher-numbered quest for this NPC. Blank falls "
-                       "back to the NPC's Quest talk tab.",
-                  wraplength=600, style="Hint.TLabel").pack(
-            anchor="w", padx=6, pady=(4, 0))
-        no_quest_grid = ttk.Frame(no_quests)
-        no_quest_grid.pack(fill="both", expand=True, padx=2, pady=2)
-        for index, (key, label, hint) in enumerate(self.NO_QUEST_FIELDS):
+        # Screens shown after this quest is completed. Their shared explanation
+        # and the impact line live inside the first completed section (quest
+        # list greeting) so nothing floats loose between the dropdowns.
+        def completed_intro(box):
+            ttk.Label(box,
+                      text="After this quest is completed  —  overrides the "
+                           "NPC's Quest talk tab. These start the moment it is "
+                           "turned in and last until the player finishes a "
+                           "higher-numbered quest for the same NPC.",
+                      wraplength=560, style="Hint.TLabel").pack(
+                anchor="w", padx=6, pady=(4, 2))
+            self.completed_impact = ttk.Label(
+                box, text="", wraplength=560, justify="left",
+                style="Accent.TLabel")
+            self.completed_impact.pack(anchor="w", padx=6, pady=(0, 6))
+
+        for i, (title, specs) in enumerate(self.COMPLETED_GROUPS):
+            self._build_screen_box(
+                right, title, specs,
+                intro=completed_intro if i == 0 else None)
+
+    def _build_screen_box(self, parent, title, specs, expanded=False,
+                          intro=None):
+        """One collapsible section holding the StringListEditors for a single
+        in-game screen. Registers each editor in self.editors by its field
+        key. intro(box), if given, adds leading widgets inside the section
+        before the fields."""
+        section = CollapsibleSection(parent, title, expanded=expanded)
+        section.pack(fill="x", padx=2, pady=(0, 4))
+        box = section.content()
+        if intro:
+            intro(box)
+        for key, label, hint in specs:
             editor = StringListEditor(
-                no_quest_grid, label, hint, height=3, on_change=self.commit,
+                box, label, hint, height=3, on_change=self.commit,
                 on_focus=lambda k=key: self.set_focus_key(k))
-            editor.grid(row=index // 2, column=index % 2,
-                        sticky="nsew", padx=4, pady=4)
+            editor.pack(fill="x", padx=6, pady=(4, 4))
             self.editors[key] = editor
-        no_quest_grid.columnconfigure(0, weight=1)
-        no_quest_grid.columnconfigure(1, weight=1)
+        return section
 
     def refresh_quest_choices(self):
         self.quest_id["values"] = self.app.quest_labels()
+        self.update_quest_desc()
+
+    def current_desc(self):
+        quest_id = quest_id_from_label(self.quest_id.get(), 0)
+        entry = self.app.quest_lookup(quest_id) if quest_id > 0 else None
+        return entry.get("desc", "") if entry else ""
+
+    def _build_desc_editor(self, parent, base_title, index, role, cache_key):
+        """One read-only-until-Edit box for a single Descriptions[] line.
+
+        role picks whose name is shown ('giver' or 'turnin'); index is which
+        Descriptions slot Save writes; cache_key is where the value is kept on
+        the quest_index entry."""
+        box = ttk.LabelFrame(parent, text=base_title)
+        box.pack(fill="x", pady=(0, 4))
+        text = tk.Text(box, height=3, wrap="word", state="disabled", undo=True)
+        text.pack(fill="x", padx=6, pady=(6, 2))
+        attach_text_spellcheck(text)
+        tools = ttk.Frame(box)
+        tools.pack(fill="x", padx=6, pady=(0, 6))
+        editor = {"box": box, "text": text, "index": index, "role": role,
+                  "cache_key": cache_key, "base_title": base_title,
+                  "editing": False}
+        editor["edit"] = ttk.Button(tools, text="Edit", width=8,
+                                    command=lambda e=editor: self.edit_desc(e))
+        editor["edit"].pack(side="left")
+        editor["save"] = ttk.Button(tools, text="Save", width=8,
+                                    state="disabled",
+                                    command=lambda e=editor: self.save_desc(e))
+        editor["save"].pack(side="left", padx=4)
+        editor["note"] = ttk.Label(tools, text="", style="Hint.TLabel")
+        editor["note"].pack(side="left", padx=8)
+        return editor
+
+    def _set_editor_text(self, editor, text):
+        widget = editor["text"]
+        widget.configure(state="normal")
+        widget.delete("1.0", tk.END)
+        widget.insert("1.0", text)
+        widget.edit_reset()
+        widget.configure(state="disabled")
+
+    def _cancel_editor_edit(self, editor):
+        if not editor.get("editing"):
+            return
+        editor["editing"] = False
+        editor["save"].configure(state="disabled")
+        editor["edit"].configure(state="normal")
+        editor["note"].configure(text="")
+
+    def update_quest_desc(self):
+        if not hasattr(self, "desc_editors"):
+            return
+        quest_id = quest_id_from_label(self.quest_id.get(), 0)
+        entry = self.app.quest_lookup(quest_id) if quest_id > 0 else None
+        self._desc_entry = entry
+        if hasattr(self, "desc_box"):
+            title = "Preview from Expansion quest file"
+            if quest_id > 0:
+                title = title + "   —  quest " + self.app.quest_label(quest_id)
+            self.desc_box.configure(text=title)
+        if hasattr(self, "quest_npc"):
+            givers = self.app.npc_givers_label(quest_id) if quest_id > 0 else ""
+            self.quest_npc.configure(
+                text=("Quest given by  " + givers) if givers else "")
+        # Name the turn-in NPC on the Hand it in box so a quest whose giver and
+        # turn-in differ can be told apart while you write its wording.
+        if hasattr(self, "editors") and "TurnInTexts" in self.editors:
+            base = next(lbl for key, lbl, _hint in self.all_list_fields
+                        if key == "TurnInTexts")
+            turnins = self.app.npc_turnins_label(quest_id) if quest_id > 0 \
+                else ""
+            self.editors["TurnInTexts"].configure(
+                text=(base + "   —  to " + turnins) if turnins else base)
+        if hasattr(self, "completed_impact"):
+            self.completed_impact.configure(
+                text=self._completed_impact_text(quest_id))
+
+        can_edit = bool(entry and entry.get("file")
+                        and os.path.isfile(entry.get("file")))
+        for editor in self.desc_editors:
+            self._cancel_editor_edit(editor)
+            editor["box"].configure(text=self._desc_title(editor, quest_id))
+            if entry:
+                self._set_editor_text(editor, entry.get(editor["cache_key"], ""))
+                editor["note"].configure(
+                    text="" if entry.get(editor["cache_key"])
+                    else ("Empty - Edit to write one." if can_edit
+                          else "Empty."))
+            else:
+                self._set_editor_text(
+                    editor,
+                    "Pick an Expansion quest above to see this line. Set a "
+                    "quest folder in Settings if the list is empty.")
+                editor["note"].configure(text="")
+            editor["edit"].configure(
+                state="normal" if can_edit else "disabled")
+            editor["save"].configure(state="disabled")
+
+    def _completed_impact_text(self, quest_id):
+        """Whose quest list this quest's 'once completed' wording appears on,
+        and where it sits in each NPC's override chain."""
+        entry = self.app.quest_lookup(quest_id) if quest_id > 0 else None
+        if not entry:
+            return ""
+        givers = entry.get("givers") or []
+        turnins = entry.get("turnins") or []
+        order = []
+        for npc in list(givers) + list(turnins):
+            if npc not in order:
+                order.append(npc)
+        if not order:
+            return ("Shown on the quest list of whichever NPC gives or takes "
+                    "in this quest, once it's completed - but this quest's "
+                    "Expansion config lists no giver or turn-in NPC yet.")
+        lines = ["Shown once completed on:"]
+        for npc in order:
+            roles = []
+            if npc in givers:
+                roles.append("giver")
+            if npc in turnins:
+                roles.append("turn-in")
+            chain = self.app.npc_quest_chain(npc)
+            lower = [q for q in chain if q < quest_id]
+            higher = [q for q in chain if q > quest_id]
+            prev_bit = ("replaces quest %d's wording" % lower[-1]) if lower \
+                else "first for this NPC"
+            next_bit = ("until quest %d is completed" % higher[0]) if higher \
+                else "stays until a higher quest for this NPC is completed"
+            lines.append("• %s (%s): %s, %s"
+                         % (self.app.npc_speaker_label(npc),
+                            " & ".join(roles), prev_bit, next_bit))
+        return "\n".join(lines)
+
+    def _desc_title(self, editor, quest_id):
+        """Box heading with whoever says the line, e.g.
+        'On offer  —  NPC 2 "Steve" says'."""
+        who = ""
+        if quest_id > 0:
+            if editor["role"] == "giver":
+                who = self.app.npc_givers_label(quest_id)
+            else:
+                who = self.app.npc_turnins_label(quest_id)
+        if who:
+            return "%s   —  %s says" % (editor["base_title"], who)
+        return "%s  (from the Expansion quest file)" % editor["base_title"]
+
+    def edit_desc(self, editor):
+        entry = self._desc_entry
+        if not entry:
+            return
+        path = entry.get("file")
+        if not path or not os.path.isfile(path):
+            messagebox.showinfo(
+                APP_TITLE,
+                "Can't find this quest's config file on disk, so this line "
+                "can't be edited here.", parent=self)
+            return
+        editor["editing"] = True
+        editor["text"].configure(state="normal")
+        editor["text"].focus_set()
+        editor["edit"].configure(state="disabled")
+        editor["save"].configure(state="normal")
+        editor["note"].configure(
+            text="Editing - Save writes this line back to the quest file.")
+
+    def save_desc(self, editor):
+        entry = self._desc_entry
+        if not entry:
+            return
+        path = entry.get("file")
+        index = editor["index"]
+        new_text = editor["text"].get("1.0", "end-1c").strip()
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as exc:
+            messagebox.showerror(
+                APP_TITLE, "Couldn't read the quest file:\n\n%s" % exc,
+                parent=self)
+            return
+        descriptions = data.get("Descriptions")
+        if not isinstance(descriptions, list):
+            descriptions = []
+        # The mod expects three lines; pad so writing line 3 never leaves gaps.
+        while len(descriptions) <= index:
+            descriptions.append("")
+        descriptions[index] = new_text
+        data["Descriptions"] = descriptions
+        try:
+            write_json(path, data)
+        except Exception as exc:
+            messagebox.showerror(
+                APP_TITLE, "Couldn't save the quest file:\n\n%s" % exc,
+                parent=self)
+            return
+        entry[editor["cache_key"]] = new_text
+        editor["editing"] = False
+        self._set_editor_text(editor, new_text)
+        editor["save"].configure(state="disabled")
+        editor["edit"].configure(state="normal")
+        editor["note"].configure(text="Saved to %s" % os.path.basename(path))
 
     def browse_quests(self):
         if not self.app.ensure_quest_folder():
@@ -2383,6 +3627,7 @@ class QuestTextTab(ttk.Frame):
         self.quest_id.delete(0, tk.END)
         self.quest_id.insert(
             0, self.app.quest_label(self.current.get("QuestID", 1)))
+        self.update_quest_desc()
         for key, editor in self.editors.items():
             editor.set_items(self.current.get(key) or [])
         self.reward_text.delete(0, tk.END)
@@ -2406,6 +3651,7 @@ class QuestTextTab(ttk.Frame):
         self.quest_list.delete(index)
         self.quest_list.insert(index, self.label_for(self.current))
         self.quest_list.selection_set(index)
+        self.update_quest_desc()
         self.app.mark_editor_dirty("Quest wording")
 
     def add_quest(self):
@@ -2435,17 +3681,21 @@ class QuestTextTab(ttk.Frame):
         self.current = None
         self.refresh_list()
 
-    QUEST_TEXT_CONFIG_VERSION = 1
+    QUEST_TEXT_CONFIG_VERSION = 2
 
     # which in-game screen each field appears on
     SCREENS = {
         "AcceptTexts": "offer",
         "DeclineTexts": "offer",
+        "OfferBackTexts": "offer",
         "InProgressTexts": "progress",
+        "InProgressBackTexts": "progress",
         "TurnInTexts": "turnin",
         "NotYetTexts": "turnin",
+        "TurnInBackTexts": "turnin",
         "RewardSelectText": "reward",
         "QuestListTexts": "questlist",
+        "QuestListBackTexts": "questlist",
         "NoQuestsTexts": "noquests",
         "NoQuestsBackTexts": "noquests",
         "NoQuestsLeaveTexts": "noquests",
@@ -2466,7 +3716,13 @@ class QuestTextTab(ttk.Frame):
                 "Add or pick a quest on the left.")
 
         quest_id = self.current.get("QuestID", 1)
-        speaker = "Quest %s" % quest_id
+        entry = self.app.quest_lookup(quest_id)
+        givers = (entry.get("givers") if entry else None) or []
+        speaker = ""
+        if givers:
+            speaker = self.app.npc_speaker_label(givers[0])
+        if not speaker:
+            speaker = "Quest %s" % quest_id
         screen = self.SCREENS.get(self.focus_key, "offer")
         active = self.focus_key
 
@@ -2474,6 +3730,8 @@ class QuestTextTab(ttk.Frame):
         icons = {"AcceptTexts": "chat", "DeclineTexts": "chat",
                  "TurnInTexts": "chat", "NotYetTexts": "exit",
                  "InProgressTexts": "exit",
+                 "OfferBackTexts": "chat", "InProgressBackTexts": "chat",
+                 "TurnInBackTexts": "chat", "QuestListBackTexts": "chat",
                  "NoQuestsBackTexts": "chat", "NoQuestsLeaveTexts": "exit"}
 
         def rows(key, kind="normal"):
@@ -2488,22 +3746,32 @@ class QuestTextTab(ttk.Frame):
         if screen == "offer":
             return PreviewScene(
                 "Quest offered", speaker,
-                "(the quest's own description shows here)",
-                rows("AcceptTexts") + rows("DeclineTexts"),
-                "Accept buttons first, then decline.")
+                self.current_desc()
+                or "(the quest's own description shows here)",
+                rows("AcceptTexts") + rows("DeclineTexts")
+                + rows("OfferBackTexts"),
+                "Accept first, then decline, then any back buttons.")
 
         if screen == "progress":
             return PreviewScene(
                 "Quest in progress", speaker,
                 "(the quest's own progress text shows here)",
-                rows("InProgressTexts"))
+                rows("InProgressTexts") + rows("InProgressBackTexts"))
 
         if screen == "turnin":
+            # Handed in to the turn-in NPC, who may not be the giver.
+            turnin_speaker = speaker
+            turnins = entry.get("turnins") if entry else None
+            if turnins:
+                turnin_speaker = self.app.npc_speaker_label(turnins[0]) \
+                    or speaker
+            turnin_line = (entry.get("desc_turnin") if entry else "") \
+                or "(the quest's own turn-in text shows here)"
             return PreviewScene(
-                "Ready to hand in", speaker,
-                "(the quest's own turn-in text shows here)",
-                rows("TurnInTexts") + rows("NotYetTexts"),
-                "Turn-in buttons first, then the back-out button.")
+                "Ready to hand in", turnin_speaker, turnin_line,
+                rows("TurnInTexts") + rows("NotYetTexts")
+                + rows("TurnInBackTexts"),
+                "Hand-in first, then not-yet, then any back buttons.")
 
         if screen == "reward":
             reward = self.reward_text.get()
@@ -2522,7 +3790,8 @@ class QuestTextTab(ttk.Frame):
             return PreviewScene(
                 "Their quest list", speaker, first,
                 [("Clear the barn", "normal", "chat"),
-                 ("Haul timber from the mill", "normal", "chat")],
+                 ("Haul timber from the mill", "normal", "chat")]
+                + rows("QuestListBackTexts"),
                 "Shown once this quest is completed. One line picked at "
                 "random; the first is shown here. Quest titles are examples.")
 
@@ -2593,8 +3862,9 @@ class MenuConfigTab(ttk.Frame):
         body.add(left_scroll, weight=2)
         body.add(right, weight=3)
 
-        place = ttk.LabelFrame(left, text="Placement")
-        place.pack(fill="x")
+        place_section = CollapsibleSection(left, "Placement", expanded=True)
+        place_section.pack(fill="x")
+        place = place_section.content()
 
         ttk.Label(place, text="Screen position").grid(
             row=0, column=0, sticky="w", padx=6, pady=4)
@@ -2656,8 +3926,9 @@ class MenuConfigTab(ttk.Frame):
         ttk.Label(border, text="0 removes it entirely.",
                   style="Hint.TLabel").pack(side="left")
 
-        colours = ttk.LabelFrame(left, text="Colours")
-        colours.pack(fill="x", pady=6)
+        colours_section = CollapsibleSection(left, "Colours", expanded=True)
+        colours_section.pack(fill="x", pady=6)
+        colours = colours_section.content()
 
         preset_row = ttk.Frame(colours)
         preset_row.pack(fill="x", padx=6, pady=4)
@@ -2683,8 +3954,9 @@ class MenuConfigTab(ttk.Frame):
                   wraplength=420, style="Hint.TLabel").pack(
             anchor="w", padx=6, pady=(2, 6))
 
-        fonts = ttk.LabelFrame(left, text="Text")
-        fonts.pack(fill="x", pady=(0, 6))
+        fonts_section = CollapsibleSection(left, "Text")
+        fonts_section.pack(fill="x", pady=(0, 6))
+        fonts = fonts_section.content()
 
         row = ttk.Frame(fonts)
         row.pack(fill="x", padx=6, pady=6)
@@ -2711,8 +3983,9 @@ class MenuConfigTab(ttk.Frame):
                   wraplength=420, style="Hint.TLabel").pack(
             anchor="w", padx=6, pady=(0, 6))
 
-        override = ttk.LabelFrame(left, text="Custom layout (advanced)")
-        override.pack(fill="x")
+        override_section = CollapsibleSection(left, "Custom layout (advanced)")
+        override_section.pack(fill="x")
+        override = override_section.content()
         ttk.Label(override,
                   text="Fonts can't be set here - DayZ only reads a font "
                        "from a .layout file. Point this at your own layout "
@@ -2724,7 +3997,8 @@ class MenuConfigTab(ttk.Frame):
         self.layout_override.pack(fill="x", padx=6, pady=(0, 6))
         self.layout_override.bind("<KeyRelease>", lambda _e: self.on_change())
 
-        preview_box = ttk.LabelFrame(right, text="Preview (approximate)")
+        preview_box = ttk.LabelFrame(right, text="Preview (approximate)",
+                                     style="Section.TLabelframe")
         preview_box.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(
             preview_box, background=self.app.palette()["preview_bg"],
@@ -3189,64 +4463,66 @@ class LivePreviewWindow(tk.Toplevel):
         y += name_size + 12
 
         if scene.line:
-            canvas.create_text(px + inner, y, anchor="nw", text=scene.line,
-                               width=max(60, pw - inner * 2), fill=line_fill,
-                               font=("Segoe UI", body_size))
-            y += self.wrapped_height(scene.line, pw - inner * 2,
-                                     body_size) + 14
+            line_id = canvas.create_text(
+                px + inner, y, anchor="nw", text=scene.line,
+                width=max(60, pw - inner * 2), fill=line_fill,
+                font=("Segoe UI", body_size))
         else:
-            canvas.create_text(px + inner, y, anchor="nw",
-                               text="(no line - the mod's built-in text "
-                                    "shows here)",
-                               width=max(60, pw - inner * 2),
-                               fill=skin["preview_edge"],
-                               font=("Segoe UI", body_size, "italic"))
-            y += body_size + 22
+            line_id = canvas.create_text(
+                px + inner, y, anchor="nw",
+                text="(no line - the mod's built-in text shows here)",
+                width=max(60, pw - inner * 2), fill=skin["preview_edge"],
+                font=("Segoe UI", body_size, "italic"))
+        # Measure what the text actually wrapped to rather than guessing, so
+        # the buttons below always start clear of it.
+        line_box = canvas.bbox(line_id)
+        y = (line_box[3] if line_box else y + body_size) + 14
 
-        show_icons = False
-        if cfg and cfg.get("ShowResponseIcons"):
-            show_icons = True
+        show_icons = bool(cfg and cfg.get("ShowResponseIcons"))
 
         row_h = max(20, int(round(24 * scale)))
+        vpad = max(3, int(round(4 * scale)))
+        gap = 4
+        bottom_limit = py + ph - inner
         for text, kind, icon in scene.buttons:
-            if y + row_h > py + ph - inner:
+            if y + row_h > bottom_limit:
                 canvas.create_text(px + inner, y, anchor="nw",
                                    text="...", fill=option_fg,
                                    font=("Segoe UI", body_size))
                 break
-            outline = option_bg
-            if kind == "hover":
-                outline = hover
-            fill_text = option_fg
-            if kind == "visited":
-                fill_text = faded
+            outline = hover if kind == "hover" else option_bg
+            fill_text = faded if kind == "visited" else option_fg
+            left = px + inner
             right = px + pw - inner
-            canvas.create_rectangle(px + inner, y, right,
-                                    y + row_h - 4, fill=option_bg,
-                                    outline=outline, width=2)
-            text_width = right - (px + inner) - 16
+            text_x = left + 8
+            text_width = right - text_x - 8
+            icon_size = 0
             if show_icons:
-                size = max(8, row_h * 0.5)
-                draw_hint_icon(canvas, right - 8 - size / 2,
-                               y + (row_h - 4) / 2, size, icon, fill_text)
-                text_width -= size + 10
-            canvas.create_text(px + inner + 8, y + (row_h - 4) / 2,
-                               anchor="w", text=text, fill=fill_text,
-                               width=max(30, text_width),
-                               font=("Segoe UI", body_size))
-            y += row_h
+                icon_size = max(8, row_h * 0.5)
+                text_width -= icon_size + 10
+            # Draw the text first so we can measure how tall it wrapped, then
+            # size the highlight box to fit it - a fixed-height box clips long
+            # options into the row below.
+            txt_id = canvas.create_text(
+                text_x, y + vpad, anchor="nw", text=text, fill=fill_text,
+                width=max(30, text_width), font=("Segoe UI", body_size))
+            text_box = canvas.bbox(txt_id)
+            text_h = (text_box[3] - text_box[1]) if text_box else body_size
+            box_h = max(row_h - 4, text_h + vpad * 2)
+            rect = canvas.create_rectangle(
+                left, y, right, y + box_h, fill=option_bg,
+                outline=outline, width=2)
+            canvas.tag_raise(txt_id, rect)
+            if show_icons:
+                draw_hint_icon(canvas, right - 8 - icon_size / 2,
+                               y + box_h / 2, icon_size, icon, fill_text)
+            y += box_h + gap
 
         if not scene.buttons:
             canvas.create_text(px + pw / 2, y + 20, anchor="n",
                                text="(no buttons yet)",
                                fill=skin["preview_edge"],
                                font=("Segoe UI", body_size, "italic"))
-
-    @staticmethod
-    def wrapped_height(text, width_px, font_size):
-        chars_per_line = max(10, int(width_px / (font_size * 0.62)))
-        lines = 1 + len(text) // chars_per_line
-        return lines * (font_size + 6)
 
 
 # ---------------------------------------------------------------- save as
@@ -3589,6 +4865,53 @@ class App(tk.Tk):
     def quest_labels(self):
         return ["%d - %s" % (e["id"], e["title"]) for e in self.quest_index]
 
+    def npc_lookup(self, npc_id):
+        for entry in self.npc_index:
+            if entry["id"] == npc_id:
+                return entry
+        return None
+
+    def npc_name(self, npc_id):
+        entry = self.npc_lookup(npc_id)
+        return entry["title"] if entry else ""
+
+    def npc_speaker_label(self, npc_id):
+        """Format an NPC for context: 'NPC 2 "Steve"', or 'NPC 2' when the
+        name hasn't been scanned in yet."""
+        if not isinstance(npc_id, int) or npc_id <= 0:
+            return ""
+        name = self.npc_name(npc_id)
+        return 'NPC %d "%s"' % (npc_id, name) if name else "NPC %d" % npc_id
+
+    def npc_givers_label(self, quest_id):
+        """'NPC 2 "Steve"' for the NPC(s) that hand out a quest, comma-joined
+        when several do. Empty when the quest or its givers aren't known."""
+        entry = self.quest_lookup(quest_id)
+        if not entry:
+            return ""
+        parts = [self.npc_speaker_label(g) for g in (entry.get("givers") or [])]
+        return ", ".join(part for part in parts if part)
+
+    def npc_turnins_label(self, quest_id):
+        """'NPC 3 "Bob"' for the NPC(s) a quest is turned in to. Lets a quest
+        with a different giver and turn-in be told apart at a glance."""
+        entry = self.quest_lookup(quest_id)
+        if not entry:
+            return ""
+        parts = [self.npc_speaker_label(t)
+                 for t in (entry.get("turnins") or [])]
+        return ", ".join(part for part in parts if part)
+
+    def npc_quest_chain(self, npc_id):
+        """Sorted quest IDs an NPC gives OR takes in - the chain the mod walks
+        for that NPC's 'once completed' wording (highest completed one wins)."""
+        ids = set()
+        for entry in self.quest_index:
+            if npc_id in (entry.get("givers") or []) \
+                    or npc_id in (entry.get("turnins") or []):
+                ids.add(entry["id"])
+        return sorted(ids)
+
     def pick_quest_folder(self):
         folder = filedialog.askdirectory(
             title="Select the folder holding your Expansion quest configs")
@@ -3685,9 +5008,29 @@ class App(tk.Tk):
                             "title": data.get("NPCName") or name,
                             "file": path})
                     elif "Title" in data:
+                        descs = data.get("Descriptions") or []
+
+                        def desc_at(pos, lines=descs):
+                            if len(lines) > pos and isinstance(lines[pos], str):
+                                return lines[pos].strip()
+                            return ""
+                        # Line 1 (offer) and line 3 (turn-in) are the two the
+                        # mod shows verbatim; line 2 is overridden mid-quest.
+                        first_desc = desc_at(0)
+                        turnin_desc = desc_at(2)
+                        givers = [g for g in (data.get("QuestGiverIDs") or [])
+                                  if isinstance(g, int)
+                                  and not isinstance(g, bool)]
+                        turnins = [t for t in (data.get("QuestTurnInIDs") or [])
+                                   if isinstance(t, int)
+                                   and not isinstance(t, bool)]
                         self.quest_index.append({
                             "id": ident,
                             "title": data.get("Title") or name,
+                            "desc": first_desc,
+                            "desc_turnin": turnin_desc,
+                            "givers": givers,
+                            "turnins": turnins,
                             "file": path})
 
         self.quest_index.sort(key=lambda e: e["id"])
@@ -3743,6 +5086,22 @@ class App(tk.Tk):
         style.configure("TLabelframe", bordercolor=colors["border"])
         style.configure("TLabelframe.Label", background=colors["bg"],
                         foreground=colors["fg"])
+        # Screen-box titles: bold and accent-coloured so each in-game screen
+        # reads as its own section and doesn't blend into the field labels.
+        style.configure("Section.TLabelframe", background=colors["bg"],
+                        bordercolor=colors["border"])
+        style.configure("Section.TLabelframe.Label", background=colors["bg"],
+                        foreground=colors["accent"],
+                        font=("Segoe UI", 10, "bold"))
+        # Collapsible section: a clickable header bar over a hideable body.
+        style.configure("Section.TFrame", background=colors["bg"])
+        style.configure("SectionBody.TFrame", background=colors["bg"])
+        style.configure("SectionHeader.TFrame", background=colors["panel"])
+        style.configure("SectionTitle.TLabel", background=colors["panel"],
+                        foreground=colors["accent"],
+                        font=("Segoe UI", 10, "bold"))
+        style.configure("SectionSub.TLabel", background=colors["panel"],
+                        foreground=colors["hint"])
         style.configure("TLabel", background=colors["bg"],
                         foreground=colors["fg"])
         style.configure("Hint.TLabel", background=colors["bg"],

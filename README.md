@@ -87,27 +87,35 @@ around their quest list.
 
 ### Quest talk
 
-Two things live here, both optional:
+The NPC-wide defaults for every quest this NPC has, grouped by the in-game
+screen each shows on and folded into dropdowns you open as needed. All
+optional:
 
-- **What they say when showing their quests** — the line above their quest
-  list, replacing the mod's built-in *"What do you need done?"*
-- **What they say when they have no quests** — the line, plus buttons that
+- **Quest list screen** — the line above their quest list, replacing the mod's
+  built-in *"What do you need done?"*, plus a back-to-conversation button
+- **Offer, in-progress and turn-in screens** — a back-to-conversation button
+  for each
+- **No-quests screen** — what they say with nothing left, plus buttons that
   carry on the conversation or end it
 
-Both are lists, and one entry is picked at random per visit. Three or four
-phrasings stops a busy NPC sounding scripted, and costs nothing per quest.
+Lines are picked at random per visit, so three or four phrasings stops a busy
+NPC sounding scripted. A finished quest can override any of these per quest on
+the Quest wording tab.
 
 <img src="docs/images/DF3.png" alt="The dialogue editor, showing the conversation outline, the node editor and the branch map">
 
 ### Quest wording
 
 What your NPCs say when a quest is offered, accepted, in progress or handed
-in. Every field is labelled **(NPC says)** or **(Player says)**, so you always
-know whether you're writing dialogue or a button.
+in — grouped into a dropdown per in-game screen, so each one holds just that
+screen's wording. Every field is labelled **(NPC says)** or **(Player says)**,
+so you always know whether you're writing dialogue or a button, and each screen
+has its own back-to-conversation button.
 
-The last group — **Once this quest is completed** — is where a chain gets its
-voice. Fill it in on quest 2 and the moment quest 2 is turned in, that becomes
-what the NPC says, until the player finishes something later in the chain:
+The **after this quest is completed** sections — the quest-list greeting and
+the nothing-left screen — are where a chain gets its voice. Fill the greeting
+in on quest 2 and the moment quest 2 is turned in, that becomes what the NPC
+says over their list, until the player finishes something later in the chain:
 
 > *"Wall's up. Talk to Hana at the docks — she's the one hiring now."*
 

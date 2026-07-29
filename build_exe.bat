@@ -53,6 +53,18 @@ if errorlevel 1 (
     exit /b 1
 )
 echo  [OK] PyInstaller ready
+
+echo  [..] Installing / updating pyspellchecker (powers spellcheck)
+python -m pip install --upgrade --quiet pyspellchecker
+set SPELLOPT=
+python -c "import spellchecker" >nul 2>&1
+if errorlevel 1 (
+    echo  [!] pyspellchecker not available - the build will still work, but
+    echo      spellcheck will be switched off in the .exe.
+) else (
+    echo  [OK] pyspellchecker ready - its dictionary will be bundled
+    set SPELLOPT=--collect-data spellchecker
+)
 echo.
 
 echo  Which build?
@@ -70,6 +82,8 @@ REM --noupx matters: UPX-compressed exes are a known antivirus trigger and
 REM the size saving is not worth the support load.
 set COMMON=--windowed --clean --noconfirm --noupx --name DialogueForge
 set COMMON=%COMMON% --icon src\logo.ico --version-file src\version_info.txt
+REM SPELLOPT bundles pyspellchecker's dictionary; empty when it isn't installed.
+set COMMON=%COMMON% %SPELLOPT%
 
 if "%CHOICE%"=="2" goto onedir
 

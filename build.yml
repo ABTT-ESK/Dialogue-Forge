@@ -15,30 +15,31 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install PyInstaller
-        run: python -m pip install --upgrade pyinstaller
+      - name: Install PyInstaller and pyspellchecker
+        run: python -m pip install --upgrade pyinstaller pyspellchecker
 
-      - name: Check the source is stdlib-only
+      - name: Check the source is stdlib-only (bar the approved extras)
         run: >
           python -c "import ast,sys;
+          allowed={'spellchecker'};
           t=ast.parse(open('src/DialogueForge.py',encoding='utf-8').read());
           m={(n.names[0].name if isinstance(n,ast.Import) else n.module or '').split('.')[0]
           for n in ast.walk(t) if isinstance(n,(ast.Import,ast.ImportFrom))};
-          extra=m-set(sys.stdlib_module_names)-{''};
-          sys.exit('third-party imports found: %s' % extra) if extra else print('stdlib only')"
+          extra=m-set(sys.stdlib_module_names)-allowed-{''};
+          sys.exit('unexpected third-party imports found: %s' % extra) if extra else print('stdlib + approved extras only')"
 
       - name: Build folder distribution
         run: >
           python -m PyInstaller --windowed --clean --noconfirm --noupx
           --name DialogueForge --icon src/logo.ico
-          --version-file src/version_info.txt
+          --version-file src/version_info.txt --collect-data spellchecker
           --onedir --distpath dist_folder src/DialogueForge.py
 
       - name: Build single-file exe
         run: >
           python -m PyInstaller --windowed --clean --noconfirm --noupx
           --name DialogueForge --icon src/logo.ico
-          --version-file src/version_info.txt
+          --version-file src/version_info.txt --collect-data spellchecker
           --onefile src/DialogueForge.py
 
       - name: Smoke test - does it launch and stay up?
