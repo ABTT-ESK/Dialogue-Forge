@@ -13,10 +13,6 @@
   profile folder instead of the `DialogFramework` folder inside it, Forge spots
   the `DialogFramework` subfolder and offers to use it — the setup mistake that
   made saves land in the wrong place.
-- **The AI configs now show up everywhere.** `AISettings.json`, `AIPatrols.json`
-  and `Factions.json` are recognised by Open file, listed in the Server files
-  tab, and included in "Check ALL config files" — previously they were invisible
-  to those.
 
 ### Editing
 - **Reputations are now pick-from-a-list, not typed.** You give a character a
