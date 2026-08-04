@@ -1,36 +1,18 @@
-"""
-DialogueForge - a config editor for the DayZ Dialogue Framework mod.
-
-Single-file Tkinter app. Stdlib only, except for one optional extra:
-`pyspellchecker` powers the spellcheck. It is bundled into the release .exe
-by PyInstaller; if it isn't installed when running from source, the app still
-runs and spellcheck simply switches itself off.
-Run with:  python DialogueForge.py   (pip install pyspellchecker for spellcheck)
-Build an .exe with build_exe.bat (PyInstaller).
-
-Edits:
-  MenuConfig.json
-  Dialogues\\NPC_<id>\\*.json
-  Dialogues\\Trader_<name>\\*.json
-  Dialogues\\Shared\\*.json
-  QuestText\\*.json
-"""
-
 import json
 import os
 import re
 import copy
+import uuid
 import webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser, simpledialog
 
-# Optional: bundled into the release .exe by PyInstaller, but the app must
-# still run from source without it (spellcheck just quietly turns off).
 try:
     from spellchecker import SpellChecker
 except Exception:
     SpellChecker = None
 
+APP_VERSION = "1.2.0"
 APP_TITLE = "DialogueForge - DayZ Dialogue Framework config editor"
 SETTINGS_FILE = os.path.join(
     os.path.expanduser("~"), ".dialogueforge_settings.json")
@@ -42,10 +24,10 @@ ACTION_TYPES = [
     "SHOW_QUEST_LIST",
     "END_CONVERSATION",
     "OPEN_TRADER",
+    "RECRUIT_AI",
+    "GO_HOSTILE",
 ]
 
-# Authorable only inside the live quest-detail step, which the mod builds
-# itself. Shown behind an "advanced" toggle so nobody picks them by accident.
 ADVANCED_ACTION_TYPES = [
     "ACCEPT_QUEST",
     "DECLINE_QUEST",
@@ -57,6 +39,8 @@ ACTION_HELP = {
     "SHOW_QUEST_LIST": "Opens the live quest list for this NPC.",
     "END_CONVERSATION": "Plays a random farewell line, then closes the window.",
     "OPEN_TRADER": "Traders only. Closes dialogue and opens the market menu.",
+    "RECRUIT_AI": "AI trees only. Recruits the AI into the player's group, then closes. Respects Expansion's recruit settings; add a RequiredQuestID to lock it behind a quest.",
+    "GO_HOSTILE": "AI trees only. The AI's whole patrol turns hostile and attacks the player, then the window closes. For conversations that can go sideways.",
     "ACCEPT_QUEST": "Advanced - only meaningful inside the live quest-detail step.",
     "DECLINE_QUEST": "Advanced - only meaningful inside the live quest-detail step.",
     "TURN_IN_QUEST": "Advanced - only meaningful inside the live quest-detail step.",
@@ -64,15 +48,10 @@ ACTION_HELP = {
 
 NODE_TYPES = ["STANDARD", "QUEST_LIST", "QUEST_DETAIL"]
 
-# First entry in the "Quest lock" dropdown - means RequiredQuestID = -1,
-# i.e. the option is always shown rather than gated behind a finished quest.
 NOT_LOCKED_LABEL = "Not locked"
 
-# First entry in a speaker line's "Standard greeting after" dropdown - means
-# OverrideQuestID = -1, i.e. the line never takes over as the fixed greeting.
 OVERRIDE_NONE_LABEL = "No override"
 
-# Built into the mod as of ConfigVersion 2 - no repacking needed.
 FONT_STYLES = [
     ("DEFAULT", "Metron Book, standard sizes"),
     ("LIGHT", "Metron Light - thinner, less shouty"),
@@ -80,7 +59,6 @@ FONT_STYLES = [
     ("COMPACT", "Metron Book at 85% - more options without scrolling"),
 ]
 
-# How each style previews: (text scale, bold speaker name)
 FONT_STYLE_PREVIEW = {
     "DEFAULT": (1.0, True),
     "LIGHT": (1.0, False),
@@ -106,7 +84,6 @@ COLOR_FIELDS = [
 ]
 
 # ---------------------------------------------------------------- themes
-# Colours sampled from the mod's own logo.
 GOLD = "#e8b33c"
 
 PALETTES = {
@@ -183,9 +160,6 @@ MENU_PRESETS = {
 
 
 # ---- artwork --------------------------------------------------------------
-# Vector-rendered PNGs embedded as base64 so the .exe stays a single file.
-# The badge mirrors the Dialogue Framework icon; colours were sampled from
-# the mod's own logo (gold #e8b33c, plate #141619, panel #1b1e23).
 LOGO_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAYAAABccqhmAAAISElEQVR42u3dwYoURxjA8X6IEAgZ"
     "gpAElcXF4BI2EMhBkBCEPY2HKOjBBxAPHgXvEcwjbLztNRfJA+zZvMKe8haT/WRXJnG7Z3qmZ6qn"
@@ -228,9 +202,6 @@ LOGO_PNG_B64 = (
     "AAAASUVORK5CYII="
 )
 
-# A git-branch mark, not GitHub's Octocat: that mark is GitHub's trademark
-# and reproducing it here would be overstepping. Swap in the official one
-# from https://github.com/logos if you'd rather use it.
 GITHUB_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAACgAAAAoCAYAAACM/rhtAAAA6klEQVR42u2Yyw3DIAyGGSSDcOga"
     "DJJBWIRrd2AQTt0ihYpIVRQJxw8gii39R8wX+YFjY9TUjPm8XzbLZ4UsNxtcgdoOShjQcqZqkYT7"
@@ -256,7 +227,6 @@ WORKSHOP_URL = ("https://steamcommunity.com/sharedfiles/filedetails/"
 
 
 def load_png(master, data, subsample=1):
-    """Return a PhotoImage, or None if Tk can't decode PNG."""
     try:
         image = tk.PhotoImage(master=master, data=data)
         if subsample > 1:
@@ -271,9 +241,21 @@ def load_logo(master, subsample=1):
 
 
 def quest_id_from_label(text, fallback=1):
-    """Pull the leading number out of '12 - Catch a Fish'."""
     match = re.match(r"\s*(\d+)", text or "")
     return int(match.group(1)) if match else fallback
+
+
+def default_ai_settings():
+    return {
+        "ResetOnDeath": 1,
+        "ResetOnWeaponStowed": 1,
+        "ResetOnLeaveArea": 1,
+        "LeaveAreaDistance": 60.0,
+        "ResetOnSurrender": 1,
+        "PersistentAggroThreshold": 0,
+        "PersistenceMode": "FACTION",
+        "CheckInterval": 2.0,
+    }
 
 
 def default_menu_config():
@@ -302,6 +284,10 @@ def new_response():
         "NextNodeID": -1,
         "RequiredQuestID": -1,
         "ActionType": "NONE",
+        "RequiredVars": [],
+        "SetVars": [],
+        "MaxUses": 0,
+        "UsesKey": "",
     }
 
 
@@ -325,6 +311,10 @@ def new_tree():
         "TraderPositions": [],
         "TraderPositionRadius": 8.0,
         "TraderMinKeyMatches": 2,
+        "AIPatrolID": 0,
+        "AIPatrolSubID": 0,
+        "ReputationVar": "",
+        "ReputationTiers": [],
         "RootNodeID": 1,
         "GreetingVoiceLineIDs": [],
         "FarewellVoiceLineIDs": [],
@@ -337,6 +327,7 @@ def new_tree():
         "OfferBackTexts": [],
         "InProgressBackTexts": [],
         "TurnInBackTexts": [],
+        "Stages": [],
         "Nodes": [new_node(1)],
     }
 
@@ -364,7 +355,6 @@ def new_quest_entry(quest_id=1):
 # ---------------------------------------------------------------- helpers
 
 def argb_to_hex(argb):
-    """[A,R,G,B] -> #rrggbb (alpha ignored, used for on-screen swatches)."""
     try:
         _a, r, g, b = [max(0, min(255, int(v))) for v in argb[:4]]
     except Exception:
@@ -373,7 +363,6 @@ def argb_to_hex(argb):
 
 
 def blend_over(argb, bg_hex="#202020"):
-    """Approximate what an ARGB colour looks like over a backdrop."""
     try:
         a, r, g, b = [max(0, min(255, int(v))) for v in argb[:4]]
     except Exception:
@@ -403,6 +392,43 @@ def safe_float(value, fallback=0.0):
         return fallback
 
 
+def rep_key_from_name(name):
+    slug = re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower()).strip("_")
+    if not slug:
+        return ""
+    return slug if slug.startswith("rep_") else "rep_" + slug
+
+
+def rep_label_from_key(key):
+    key = str(key or "")
+    base = key[4:] if key.startswith("rep_") else key
+    base = base.replace("_", " ").strip()
+    return base.title() if base else key
+
+
+VAR_CONDITION_OPS = ("EQUALS", "NOT_EQUAL", "AT_LEAST", "AT_MOST",
+                     "MORE_THAN", "BELOW")
+VAR_SET_OPS = ("SET", "INCREASE", "DECREASE")
+
+
+def clean_var_ops(raw):
+    ops = []
+    for entry in (raw or []):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("Name", "")).strip()
+        if not name:
+            continue
+        ops.append({
+            "Name": name,
+            "Op": (str(entry.get("Op", "SET")).strip().upper() or "SET"),
+            "Value": safe_int(entry.get("Value", 0), 0),
+        })
+    return ops
+
+
+
+
 def write_json(path, data):
     folder = os.path.dirname(path)
     if folder and not os.path.isdir(folder):
@@ -412,13 +438,6 @@ def write_json(path, data):
 
 
 def add_entry_undo(entry):
-    """Give a tk/ttk Entry a simple undo/redo stack on Ctrl+Z / Ctrl+Y.
-
-    tk.Text has undo built in; Entry doesn't, so we snapshot the text after
-    each edit and step back through the snapshots. After restoring we fire a
-    synthetic <KeyRelease> so whatever the entry normally commits on typing
-    (marking the file dirty, updating the outline) stays in sync.
-    """
     undo_stack = [entry.get()]
     redo_stack = []
     state = {"last": entry.get()}
@@ -451,8 +470,6 @@ def add_entry_undo(entry):
         return "break"
 
     def resync(_event=None):
-        # Editors reuse one widget for many rows, so refresh the baseline
-        # whenever the value is replaced from outside (loading a new item).
         current = entry.get()
         if current != state["last"]:
             del undo_stack[:]
@@ -470,14 +487,9 @@ def add_entry_undo(entry):
 
 
 # ---------------------------------------------------------------- spellcheck
-# Powered by the optional pyspellchecker package. Everything degrades to a
-# no-op when it isn't importable, so the app never depends on it being there.
 
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z'’]*")
 
-# Words worth flagging: skip short tokens, anything with a digit, ALL-CAPS
-# acronyms (NPC, ID) and CamelCase class names (ExpansionTraderAIDenis) -
-# a dialogue tool is full of those and underlining them is just noise.
 def spell_checkable(token):
     if len(token) < 3:
         return False
@@ -491,11 +503,6 @@ def spell_checkable(token):
 
 
 class SpellManager:
-    """One shared spellchecker plus a user dictionary the player can grow.
-
-    The English word list is heavy to build, so it's created lazily the first
-    time something is actually checked, not at import or startup.
-    """
 
     def __init__(self):
         self.checker = None
@@ -581,7 +588,6 @@ def _popup_menu(menu, event):
 
 
 def attach_text_spellcheck(text):
-    """Red-underline misspellings in a tk.Text and offer fixes on right-click."""
     if SpellChecker is None:
         return
     text.tag_configure("spell_bad", foreground="#e05555", underline=True)
@@ -653,10 +659,6 @@ def attach_text_spellcheck(text):
 
 
 def attach_entry_spellcheck(entry):
-    """Right-click spelling suggestions for a single-line Entry.
-
-    Entries can't underline individual words the way a Text can, so the fix is
-    offered through the context menu instead."""
     if SpellChecker is None:
         return
 
@@ -714,7 +716,6 @@ def attach_entry_spellcheck(entry):
 # ---------------------------------------------------------------- widgets
 
 class StringListEditor(ttk.LabelFrame):
-    """Reusable add/remove/reorder editor for a list of strings."""
 
     def __init__(self, master, title, hint="", height=5, on_change=None,
                  on_focus=None):
@@ -810,12 +811,207 @@ class StringListEditor(ttk.LabelFrame):
         self._fire()
 
 
-class CollapsibleSection(ttk.Frame):
-    """A titled panel whose body shows or hides when its header is clicked.
+class VarOpEditor(ttk.Frame):
+    """Plain-English editor for a list of variable operations. mode 'set' shows
+    Increase/Decrease/Set to; mode 'condition' shows is at least / is not / etc."""
 
-    Lets a tab read as a short list of section headers you open as needed,
-    instead of every field being on screen at once. Add this section's widgets
-    to content()."""
+    SET_LABELS = [("Increase by", "INCREASE"), ("Decrease by", "DECREASE"),
+                  ("Set to", "SET")]
+    COND_LABELS = [("is at least", "AT_LEAST"), ("is more than", "MORE_THAN"),
+                   ("is at most", "AT_MOST"), ("is below", "BELOW"),
+                   ("is exactly", "EQUALS"), ("is not", "NOT_EQUAL")]
+
+    def __init__(self, master, mode, on_change=None, name_provider=None):
+        ttk.Frame.__init__(self, master)
+        self.mode = mode
+        self.on_change = on_change
+        self.name_provider = name_provider
+        self.rows = []
+        self._loading = False
+
+        pairs = self.SET_LABELS if mode == "set" else self.COND_LABELS
+        self.labels = [p[0] for p in pairs]
+        self.label_to_code = {}
+        self.code_to_label = {}
+        for label, code in pairs:
+            self.label_to_code[label] = code
+            self.code_to_label[code] = label
+
+        self.rows_frame = ttk.Frame(self)
+        self.rows_frame.pack(fill="x")
+
+        ttk.Button(self, text="+ Add", width=8,
+                   command=lambda: self.add_row()).pack(anchor="w", pady=(2, 2))
+
+    def _fire(self):
+        if self.on_change and not self._loading:
+            self.on_change()
+
+    def _name_options(self):
+        if not self.name_provider:
+            return []
+        try:
+            return list(self.name_provider())
+        except Exception:
+            return []
+
+    def _resolve_key(self, text):
+        text = str(text).strip()
+        if not text:
+            return ""
+        for label, key in self._name_options():
+            if text == label or text == key:
+                return key
+        return text
+
+    def _display_for(self, key):
+        for label, existing in self._name_options():
+            if existing == key:
+                return label
+        return key
+
+    def add_row(self, name="", code="", value=0):
+        row = ttk.Frame(self.rows_frame)
+        row.pack(fill="x", pady=1)
+
+        ttk.Label(row, text="Reputation" if self.mode == "condition"
+                  else "Change").pack(side="left")
+
+        if self.name_provider:
+            name_entry = ttk.Combobox(row, width=16)
+            name_entry.set(self._display_for(name))
+
+            def refresh_values(entry=name_entry):
+                entry["values"] = [label for label, _key in self._name_options()]
+            refresh_values()
+            name_entry.configure(postcommand=refresh_values)
+            name_entry.bind("<<ComboboxSelected>>", lambda _e: self._fire())
+        else:
+            name_entry = ttk.Entry(row, width=16)
+            name_entry.insert(0, name)
+        name_entry.pack(side="left", padx=4)
+        name_entry.bind("<KeyRelease>", lambda _e: self._fire())
+
+        op = ttk.Combobox(row, values=self.labels, width=12, state="readonly")
+        op.set(self.code_to_label.get(str(code).upper(), self.labels[0]))
+        op.pack(side="left", padx=4)
+        op.bind("<<ComboboxSelected>>", lambda _e: self._fire())
+
+        value_spin = ttk.Spinbox(row, from_=-1000000, to=1000000, width=7,
+                                 command=self._fire)
+        value_spin.delete(0, tk.END)
+        value_spin.insert(0, str(value))
+        value_spin.pack(side="left", padx=4)
+        value_spin.bind("<KeyRelease>", lambda _e: self._fire())
+
+        if self.mode == "set":
+            ttk.Label(row, text="point(s)").pack(side="left", padx=(2, 0))
+
+        entry = {"frame": row, "name": name_entry, "op": op,
+                 "value": value_spin}
+        ttk.Button(row, text="×", width=3,
+                   command=lambda: self._remove(entry)).pack(
+            side="left", padx=(4, 0))
+        self.rows.append(entry)
+        self._fire()
+
+    def _remove(self, entry):
+        entry["frame"].destroy()
+        if entry in self.rows:
+            self.rows.remove(entry)
+        self._fire()
+
+    def get_ops(self):
+        ops = []
+        for row in self.rows:
+            name = self._resolve_key(row["name"].get())
+            if not name:
+                continue
+            ops.append({
+                "Name": name,
+                "Op": self.label_to_code.get(row["op"].get(), self.labels[0]),
+                "Value": safe_int(row["value"].get(), 0),
+            })
+        return ops
+
+    def set_ops(self, ops):
+        self._loading = True
+        for row in list(self.rows):
+            row["frame"].destroy()
+        self.rows = []
+        for op in (ops or []):
+            self.add_row(op.get("Name", ""), op.get("Op", ""),
+                         safe_int(op.get("Value", 0), 0))
+        self._loading = False
+
+
+class RepTierEditor(ttk.Frame):
+    """Rows of 'at N or more, show <label>' for the reputation marker."""
+
+    def __init__(self, master, on_change=None):
+        ttk.Frame.__init__(self, master)
+        self.on_change = on_change
+        self.rows = []
+        self._loading = False
+        self.rows_frame = ttk.Frame(self)
+        self.rows_frame.pack(fill="x")
+        ttk.Button(self, text="+ Add tier", width=10,
+                   command=lambda: self.add_row()).pack(anchor="w", pady=(2, 2))
+
+    def _fire(self):
+        if self.on_change and not self._loading:
+            self.on_change()
+
+    def add_row(self, threshold=0, label=""):
+        row = ttk.Frame(self.rows_frame)
+        row.pack(fill="x", pady=1)
+        ttk.Label(row, text="At").pack(side="left")
+        t = ttk.Spinbox(row, from_=-1000000, to=1000000, width=6,
+                        command=self._fire)
+        t.delete(0, tk.END)
+        t.insert(0, str(threshold))
+        t.pack(side="left", padx=4)
+        t.bind("<KeyRelease>", lambda _e: self._fire())
+        ttk.Label(row, text="or more, show").pack(side="left")
+        lab = ttk.Entry(row, width=16)
+        lab.insert(0, label)
+        lab.pack(side="left", padx=4)
+        lab.bind("<KeyRelease>", lambda _e: self._fire())
+        entry = {"frame": row, "threshold": t, "label": lab}
+        ttk.Button(row, text="×", width=3,
+                   command=lambda: self._remove(entry)).pack(
+            side="left", padx=(4, 0))
+        self.rows.append(entry)
+        self._fire()
+
+    def _remove(self, entry):
+        entry["frame"].destroy()
+        if entry in self.rows:
+            self.rows.remove(entry)
+        self._fire()
+
+    def get_tiers(self):
+        out = []
+        for row in self.rows:
+            label = row["label"].get().strip()
+            if not label:
+                continue
+            out.append({"Threshold": safe_int(row["threshold"].get(), 0),
+                        "Label": label})
+        return out
+
+    def set_tiers(self, tiers):
+        self._loading = True
+        for row in list(self.rows):
+            row["frame"].destroy()
+        self.rows = []
+        for tier in (tiers or []):
+            self.add_row(safe_int(tier.get("Threshold", 0), 0),
+                         str(tier.get("Label", "")))
+        self._loading = False
+
+
+class CollapsibleSection(ttk.Frame):
 
     def __init__(self, master, title, expanded=False, subtitle=""):
         ttk.Frame.__init__(self, master, style="Section.TFrame")
@@ -834,7 +1030,6 @@ class CollapsibleSection(ttk.Frame):
             ttk.Label(self.header, text=subtitle, style="SectionSub.TLabel",
                       cursor="hand2").pack(side="left", padx=10, pady=3)
 
-        # The whole header bar is the click target, not just the words.
         for widget in (self.header, self._arrow, self._title):
             widget.bind("<Button-1>", self._toggle)
 
@@ -857,14 +1052,10 @@ class CollapsibleSection(ttk.Frame):
             self._toggle()
 
     def content(self):
-        """The frame to place this section's widgets in."""
         return self.body
 
 
 class SpeakerLinesEditor(ttk.LabelFrame):
-    """Extra spoken lines for a node. The mod picks one at random from the
-    node's main line plus whichever of these the player qualifies for; each
-    line can be locked to a completed quest and carry its own voice lines."""
 
     def __init__(self, master, app, on_change=None):
         ttk.LabelFrame.__init__(
@@ -918,8 +1109,6 @@ class SpeakerLinesEditor(ttk.LabelFrame):
         self.text.bind("<KeyRelease>", lambda _e: self.commit_current())
         attach_text_spellcheck(self.text)
 
-        # Both quest dropdowns share one row - there's plenty of width and it
-        # keeps the panel short. Labels size to their text so nothing clips.
         locks = ttk.Frame(self.detail)
         locks.grid(row=2, column=0, sticky="w", pady=(0, 2))
 
@@ -961,6 +1150,14 @@ class SpeakerLinesEditor(ttk.LabelFrame):
             on_change=self.commit_current)
         self.voice.grid(row=4, column=0, sticky="ew")
 
+        ttk.Label(self.detail, text="Only use this line if:",
+                  style="Accent.TLabel").grid(row=5, column=0, sticky="w",
+                                              pady=(6, 0))
+        self.require_vars = VarOpEditor(self.detail, "condition",
+                                        on_change=self.commit_current,
+                                        name_provider=self.app.known_reputations)
+        self.require_vars.grid(row=6, column=0, sticky="ew", pady=(0, 4))
+
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
         self.set_current(None)
@@ -986,6 +1183,7 @@ class SpeakerLinesEditor(ttk.LabelFrame):
                 "RequiredQuestID": gate if gate and gate > 0 else -1,
                 "OverrideQuestID": override if override and override > 0 else -1,
                 "VoiceLineIDs": list(line.get("VoiceLineIDs") or []),
+                "RequiredVars": clean_var_ops(line.get("RequiredVars")),
             })
         return out
 
@@ -1030,6 +1228,7 @@ class SpeakerLinesEditor(ttk.LabelFrame):
             self.gate.set(NOT_LOCKED_LABEL)
             self.override.set(OVERRIDE_NONE_LABEL)
             self.voice.set_items([])
+            self.require_vars.set_ops([])
             self.loading = False
             self._set_detail_enabled(False)
             self.update_gate_note()
@@ -1047,6 +1246,7 @@ class SpeakerLinesEditor(ttk.LabelFrame):
         self.override.set(self.app.quest_label(override)
                           if override and override > 0 else OVERRIDE_NONE_LABEL)
         self.voice.set_items(self.current.get("VoiceLineIDs") or [])
+        self.require_vars.set_ops(self.current.get("RequiredVars"))
         self.loading = False
         self._set_detail_enabled(True)
         self.update_gate_note()
@@ -1187,6 +1387,7 @@ class SpeakerLinesEditor(ttk.LabelFrame):
             self.current["OverrideQuestID"] = max(
                 1, quest_id_from_label(override_text, 1))
         self.current["VoiceLineIDs"] = self.voice.get_items()
+        self.current["RequiredVars"] = self.require_vars.get_ops()
         index = self.lines.index(self.current)
         self.listbox.delete(index)
         self.listbox.insert(index, self.label_for(self.current))
@@ -1195,12 +1396,6 @@ class SpeakerLinesEditor(ttk.LabelFrame):
 
 
 class ScrollFrame(ttk.Frame):
-    """A vertically scrolling container. Add children to .inner.
-
-    Needed because the taller tabs don't fit a 1080p screen once the window
-    is anything less than maximised, and clipped controls are unreachable.
-    The scrollbar hides itself whenever everything already fits.
-    """
 
     def __init__(self, master):
         ttk.Frame.__init__(self, master)
@@ -1247,7 +1442,6 @@ class ScrollFrame(ttk.Frame):
 
 
 class ColorRow(ttk.Frame):
-    """Swatch + colour picker + alpha slider, storing [A,R,G,B]."""
 
     def __init__(self, master, label, value, on_change=None):
         ttk.Frame.__init__(self, master)
@@ -1256,8 +1450,6 @@ class ColorRow(ttk.Frame):
 
         ttk.Label(self, text=label, width=22).grid(row=0, column=0, sticky="w")
         self.swatch = tk.Label(self, width=6, relief="sunken", bd=1)
-        # its whole job is to show the chosen colour, so the app theme
-        # must not repaint it
         self.swatch._skip_theme = True
         self.swatch.grid(row=0, column=1, padx=4)
         ttk.Button(self, text="Pick colour", width=12,
@@ -1274,9 +1466,6 @@ class ColorRow(ttk.Frame):
         self.rgb_label = ttk.Label(self, width=18, style="Hint.TLabel")
         self.rgb_label.grid(row=0, column=6, padx=(8, 0), sticky="w")
 
-        # Attach the handler only after the initial value and the labels it
-        # touches exist, so building the row (which calls set()) can't fire
-        # _alpha_moved before alpha_label is created or mark the editor dirty.
         self.slider.set(self.value[0])
         self.slider.configure(command=self._alpha_moved)
 
@@ -1315,11 +1504,8 @@ class ColorRow(ttk.Frame):
 
 
 # ---------------------------------------------------------------- validation
-# Kept at module level so the same rules run whether you're checking the
-# tab you're editing or sweeping every file in the profile folder.
 
 def kind_and_key_from_path(path):
-    """Work out what a dialogue file is for from the folder holding it."""
     folder = os.path.basename(os.path.dirname(path))
     if folder.startswith("NPC_"):
         return "NPC", folder[4:]
@@ -1366,8 +1552,29 @@ def validate_tree_dict(data, kind, key, quest_index=None):
         issues.append(
             "RootNodeID %s doesn't match any node in this tree." % root)
 
-    # The no-quests step is only ever reached through the live quest list, so
-    # wording set here is dead weight if nothing opens that list.
+    for si, stage in enumerate(data.get("Stages") or []):
+        tree_no = si + 2
+        st_quest = stage.get("RequiredQuestID", -1)
+        st_nodes = stage.get("Nodes") or []
+        st_ids = [n.get("ID") for n in st_nodes]
+        if not isinstance(st_quest, int) or st_quest <= 0:
+            issues.append(
+                "Tree %d has no unlock quest set, so it can never open." % tree_no)
+        elif quest_index and not any(q["id"] == st_quest for q in quest_index):
+            warnings.append(
+                "Tree %d's unlock quest %s isn't in your quest folder."
+                % (tree_no, st_quest))
+        if not st_nodes:
+            issues.append("Tree %d has no nodes." % tree_no)
+        elif stage.get("RootNodeID") not in st_ids:
+            issues.append(
+                "Tree %d opens on node %s, which doesn't exist in that tree."
+                % (tree_no, stage.get("RootNodeID")))
+        for node_id in set(st_ids):
+            if st_ids.count(node_id) > 1:
+                issues.append(
+                    "Tree %d uses node ID %s more than once." % (tree_no, node_id))
+
     has_no_quest_wording = data.get("QuestListTexts") \
         or data.get("NoQuestsTexts") \
         or data.get("NoQuestsBackTexts") \
@@ -1448,8 +1655,6 @@ def validate_tree_dict(data, kind, key, quest_index=None):
                     "%s uses %s, which only works inside the live "
                     "quest-detail step the mod builds itself."
                     % (label, action))
-            # NB: not `x or -1` here - that quietly turns 0 into -1, and
-            # 0 is precisely the value this check exists to catch.
             gate = response.get("RequiredQuestID", -1)
             if gate is None:
                 gate = -1
@@ -1505,6 +1710,35 @@ def validate_tree_dict(data, kind, key, quest_index=None):
                 "No option uses OPEN_TRADER, so players can't reach the "
                 "shop from this conversation.")
 
+    if kind == "AI" and safe_int(data.get("AIPatrolID", 0), 0) <= 0:
+        issues.append(
+            "This is an AI tree but AIPatrolID is 0 - it won't attach to any "
+            "AI. Set it to the DialogueID of a patrol in AIPatrol\\AIPatrols.json.")
+
+    has_ai_action = any(r.get("ActionType") in ("RECRUIT_AI", "GO_HOSTILE")
+                        for nd in nodes for r in nd.get("Responses", []))
+    if has_ai_action and safe_int(data.get("AIPatrolID", 0), 0) <= 0:
+        warnings.append(
+            "An option uses an AI action (RECRUIT_AI / GO_HOSTILE) but no "
+            "AIPatrolID is set, so this tree won't attach to any AI.")
+
+    for nd in nodes:
+        for r in nd.get("Responses", []):
+            label = str(r.get("Text", ""))[:24]
+            for o in (r.get("SetVars") or []):
+                if o.get("Op") not in VAR_SET_OPS:
+                    warnings.append(
+                        "Option '%s' changes reputation '%s' with an unknown "
+                        "action '%s' - expected Increase by / Decrease by / "
+                        "Set to." % (label, o.get("Name"), o.get("Op")))
+            for o in (r.get("RequiredVars") or []):
+                if o.get("Op") not in VAR_CONDITION_OPS:
+                    warnings.append(
+                        "Option '%s' checks reputation '%s' with an unknown "
+                        "test '%s' - expected is at least / is at most / is "
+                        "more than / is below / is exactly / is not."
+                        % (label, o.get("Name"), o.get("Op")))
+
     return issues, warnings
 
 
@@ -1533,8 +1767,6 @@ def validate_quest_dict(data):
             warnings.append(
                 "Quest %s has no wording at all - it will use the built-in "
                 "defaults." % quest.get("QuestID"))
-        # The mod only reaches a quest's no-quests wording when that quest
-        # supplies a spoken line, so buttons on their own never appear.
         has_buttons = quest.get("NoQuestsBackTexts") \
             or quest.get("NoQuestsLeaveTexts")
         if has_buttons and not quest.get("NoQuestsTexts"):
@@ -1613,7 +1845,6 @@ def validate_menu_dict(cfg, resolved=None):
 # ---------------------------------------------------------------- chooser
 
 class ChooserDialog(tk.Toplevel):
-    """Searchable picker over the scanned Expansion configs."""
 
     def __init__(self, app, title, entries, hint=""):
         tk.Toplevel.__init__(self, app)
@@ -1679,8 +1910,6 @@ class ChooserDialog(tk.Toplevel):
 # ---------------------------------------------------------------- dialogue tab
 
 class DialogueTab(ttk.Frame):
-    """Three panes: an outline of the whole conversation, the editor for
-    whatever is selected, and a branch map showing where you are."""
 
     BOX_W = 132
     BOX_H = 46
@@ -1692,13 +1921,12 @@ class DialogueTab(ttk.Frame):
         ttk.Frame.__init__(self, master)
         self.app = app
         self.tree = new_tree()
+        self.current_stage_index = -1
         self.current_node = None
         self.current_response = None
         self.loading = False
         self.source_path = None
         self.map_boxes = {}
-        # which outline row the editors are currently showing; used to
-        # ignore the selection event a programmatic rebuild fires
         self._loaded_iid = None
 
         self.target_kind = tk.StringVar(value="NPC")
@@ -1727,7 +1955,6 @@ class DialogueTab(ttk.Frame):
         self._build_flow(self.flow_page)
         self.refresh_all()
 
-    # --- setup page
 
     def _build_setup(self, parent):
         scroll = ScrollFrame(parent)
@@ -1747,6 +1974,7 @@ class DialogueTab(ttk.Frame):
                 ("A single quest NPC", "NPC"),
                 ("A trader", "TRADER"),
                 ("Shared by several NPCs", "SHARED"),
+                ("Talkable AI (Expansion)", "AI"),
         ]):
             ttk.Radiobutton(who, text=label, value=value,
                             variable=self.target_kind,
@@ -1754,35 +1982,33 @@ class DialogueTab(ttk.Frame):
                 row=index, column=0, columnspan=2, sticky="w", padx=6)
 
         self.key_label = ttk.Label(who, text="Quest NPC ID")
-        self.key_label.grid(row=3, column=0, sticky="w", padx=6, pady=(8, 2))
+        self.key_label.grid(row=4, column=0, sticky="w", padx=6, pady=(8, 2))
         key_row = ttk.Frame(who)
-        key_row.grid(row=3, column=1, sticky="w", pady=(8, 2))
-        key_entry = ttk.Entry(key_row, textvariable=self.folder_key, width=24)
-        key_entry.pack(side="left")
-        key_entry.bind("<KeyRelease>", lambda _e: self.mark_dirty())
+        key_row.grid(row=4, column=1, sticky="w", pady=(8, 2))
+        self.key_entry = ttk.Entry(key_row, textvariable=self.folder_key, width=24)
+        self.key_entry.pack(side="left")
+        self.key_entry.bind("<KeyRelease>", lambda _e: self.mark_dirty())
         self.pick_npc_button = ttk.Button(key_row, text="Pick NPC...",
                                           width=12, command=self.browse_npcs)
         self.pick_npc_button.pack(side="left", padx=6)
-        # Shows whose conversation this is once an ID is typed, e.g. "Steve",
-        # so you don't have to cross-check the NPC config to know who you're on.
         self.npc_name_label = ttk.Label(key_row, text="",
                                         style="Accent.TLabel")
         self.npc_name_label.pack(side="left", padx=(8, 0))
 
         self.key_hint = ttk.Label(who, text="", wraplength=340,
                                   style="Hint.TLabel")
-        self.key_hint.grid(row=4, column=0, columnspan=2,
+        self.key_hint.grid(row=5, column=0, columnspan=2,
                            sticky="w", padx=6, pady=(0, 6))
 
-        ttk.Label(who, text="File name").grid(row=5, column=0,
+        ttk.Label(who, text="File name").grid(row=6, column=0,
                                               sticky="w", padx=6)
         name_entry = ttk.Entry(who, textvariable=self.file_name, width=24)
-        name_entry.grid(row=5, column=1, sticky="w")
+        name_entry.grid(row=6, column=1, sticky="w")
         name_entry.bind("<KeyRelease>", lambda _e: self.mark_dirty())
 
         self.path_preview = ttk.Label(who, text="", wraplength=340,
                                       style="Accent.TLabel")
-        self.path_preview.grid(row=6, column=0, columnspan=2,
+        self.path_preview.grid(row=7, column=0, columnspan=2,
                                sticky="w", padx=6, pady=(6, 8))
 
         self.trader_frame = ttk.LabelFrame(
@@ -1813,6 +2039,53 @@ class DialogueTab(ttk.Frame):
         self.min_keys.bind("<<ComboboxSelected>>",
                            lambda _e: self.mark_dirty())
 
+        self.ai_frame = ttk.LabelFrame(
+            left, text="Which AI (Expansion patrol)",
+            style="Section.TLabelframe")
+        ttk.Label(
+            self.ai_frame,
+            text="Spawn the AI via AIPatrol\\AIPatrols.json with a DialogueID, "
+                 "then lock this tree onto it here.",
+            wraplength=340, style="Hint.TLabel").pack(
+            anchor="w", padx=6, pady=(4, 2))
+        ai_row = ttk.Frame(self.ai_frame)
+        ai_row.pack(fill="x", padx=6, pady=(2, 6))
+        ttk.Label(ai_row, text="Patrol DialogueID").pack(side="left")
+        self.ai_patrol_id = ttk.Spinbox(ai_row, from_=0, to=1000000, width=8,
+                                        command=self.mark_dirty)
+        self.ai_patrol_id.pack(side="left", padx=(4, 12))
+        self.ai_patrol_id.bind("<KeyRelease>", lambda _e: self.mark_dirty())
+        ttk.Label(ai_row, text="Sub-ID (0 = any unit)").pack(side="left")
+        self.ai_sub_id = ttk.Spinbox(ai_row, from_=0, to=100000, width=6,
+                                     command=self.mark_dirty)
+        self.ai_sub_id.pack(side="left", padx=4)
+        self.ai_sub_id.bind("<KeyRelease>", lambda _e: self.mark_dirty())
+
+        rep_frame = ttk.LabelFrame(
+            left, text="This character's reputation (optional)",
+            style="Section.TLabelframe")
+        rep_frame.pack(fill="x", pady=(6, 0))
+        ttk.Label(
+            rep_frame,
+            text="Give this character a name to track its own reputation, "
+                 "separate from everyone else. Other NPCs can then pick this "
+                 "name from a dropdown to raise or lower it — no codes to type.",
+            wraplength=340, style="Hint.TLabel").pack(anchor="w", padx=6,
+                                                      pady=(4, 2))
+        rep_row = ttk.Frame(rep_frame)
+        rep_row.pack(fill="x", padx=6, pady=(0, 2))
+        ttk.Label(rep_row, text="Character name").pack(side="left")
+        self.reputation_var = ttk.Entry(rep_row, width=20)
+        self.reputation_var.pack(side="left", padx=(4, 0))
+        self.reputation_var.bind("<KeyRelease>",
+                                 lambda _e: self._on_reputation_typed())
+        self.rep_key_hint = ttk.Label(rep_frame, text="", style="Hint.TLabel")
+        self.rep_key_hint.pack(anchor="w", padx=6)
+        ttk.Label(rep_frame, text="Marker shows (optional tiers):",
+                  style="Hint.TLabel").pack(anchor="w", padx=6, pady=(2, 0))
+        self.rep_tiers = RepTierEditor(rep_frame, on_change=self.mark_dirty)
+        self.rep_tiers.pack(fill="x", padx=6, pady=(0, 4))
+
         self.greeting = StringListEditor(
             right, "Greeting voice lines (optional)",
             "Played when the conversation opens. One picked at random. "
@@ -1826,12 +2099,8 @@ class DialogueTab(ttk.Frame):
             on_change=self.mark_dirty)
         self.farewell.pack(fill="both", expand=True)
 
-    # --- quest talk page
 
     def _build_quest_talk(self, parent):
-        """What this NPC says around their quest list. Lives in the dialogue
-        file, so it belongs beside the conversation rather than on the
-        Quest wording tab, which writes a different file entirely."""
         scroll = ScrollFrame(parent)
         scroll.pack(fill="both", expand=True)
         parent = scroll.inner
@@ -1862,8 +2131,6 @@ class DialogueTab(ttk.Frame):
             back_hint, height=3, on_change=self.mark_dirty)
         self.quest_list_back.pack(fill="x", padx=6, pady=(0, 6))
 
-        # The offer / in-progress / turn-in wording itself is written per quest
-        # on the Quest wording tab; only the back buttons are NPC-wide here.
         offer_section = CollapsibleSection(parent, "Offer screen  (optional)")
         offer_section.pack(fill="x", padx=4, pady=(0, 4))
         offer_box = offer_section.content()
@@ -1918,7 +2185,6 @@ class DialogueTab(ttk.Frame):
             on_change=self.mark_dirty)
         self.no_quests_voice.pack(fill="x", padx=6, pady=(6, 6))
 
-    # --- flow page
 
     def _build_flow(self, parent):
         panes = ttk.PanedWindow(parent, orient="horizontal")
@@ -1936,6 +2202,18 @@ class DialogueTab(ttk.Frame):
         self._build_map(map_pane)
 
     def _build_outline(self, parent):
+        tree_row = ttk.Frame(parent)
+        tree_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(tree_row, text="Editing tree",
+                  font=("Segoe UI", 10, "bold")).pack(side="left")
+        self.tree_selector = ttk.Combobox(tree_row, state="readonly", width=28)
+        self.tree_selector.pack(side="left", padx=4)
+        self.tree_selector.bind("<<ComboboxSelected>>", self.on_tree_changed)
+        ttk.Button(tree_row, text="Add tree", width=9,
+                   command=self.add_tree).pack(side="left", padx=(6, 0))
+        ttk.Button(tree_row, text="Remove", width=8,
+                   command=self.remove_tree).pack(side="left", padx=2)
+
         box = ttk.LabelFrame(parent, text="Conversation outline",
                              style="Section.TLabelframe")
         box.pack(fill="both", expand=True)
@@ -1972,6 +2250,151 @@ class DialogueTab(ttk.Frame):
         self.root_node.pack(side="left", padx=6)
         self.root_node.bind("<<ComboboxSelected>>", self.on_root_changed)
 
+        self.stage_quest_row = ttk.Frame(parent)
+        self.stage_quest_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(self.stage_quest_row, text="This tree unlocks after quest").pack(
+            side="left")
+        self.stage_quest = ttk.Combobox(self.stage_quest_row, width=22)
+        self.stage_quest.pack(side="left", padx=4)
+        self.stage_quest.bind("<<ComboboxSelected>>", self.on_stage_quest_changed)
+        self.stage_quest.bind("<KeyRelease>", self.on_stage_quest_changed)
+
+        self.stage_priority_row = ttk.Frame(parent)
+        ttk.Label(self.stage_priority_row,
+                  text="Priority (if several trees qualify, highest wins)").pack(
+            side="left")
+        self.stage_priority = ttk.Spinbox(
+            self.stage_priority_row, from_=0, to=1000000, width=7,
+            command=self.on_stage_priority_changed)
+        self.stage_priority.pack(side="left", padx=4)
+        self.stage_priority.bind("<KeyRelease>",
+                                 self.on_stage_priority_changed)
+
+        self.stage_vars_row = ttk.Frame(parent)
+        ttk.Label(self.stage_vars_row,
+                  text="…or this tree opens when reputation:",
+                  style="Accent.TLabel").pack(anchor="w")
+        self.stage_vars = VarOpEditor(self.stage_vars_row, "condition",
+                                      on_change=self.on_stage_vars_changed,
+                                      name_provider=self.app.known_reputations)
+        self.stage_vars.pack(fill="x")
+
+    def container(self):
+        if self.current_stage_index >= 0:
+            stages = self.tree.get("Stages") or []
+            if self.current_stage_index < len(stages):
+                return stages[self.current_stage_index]
+        return self.tree
+
+    def tree_labels(self):
+        labels = ["Tree 1  —  starting tree"]
+        for i, stage in enumerate(self.tree.get("Stages") or []):
+            quest = stage.get("RequiredQuestID", -1)
+            if quest and quest > 0:
+                cond = "after quest %s" % quest
+            elif clean_var_ops(stage.get("RequiredVars")):
+                cond = "by reputation"
+            else:
+                cond = "(no trigger set)"
+            labels.append("Tree %d  —  %s" % (i + 2, cond))
+        return labels
+
+    def refresh_tree_selector(self):
+        if not hasattr(self, "tree_selector"):
+            return
+        self.tree_selector["values"] = self.tree_labels()
+        stages = self.tree.get("Stages") or []
+        if self.current_stage_index >= len(stages):
+            self.current_stage_index = -1
+        self.tree_selector.current(self.current_stage_index + 1)
+
+        if self.current_stage_index >= 0:
+            self.stage_quest.configure(state="normal")
+            self.stage_quest["values"] = self.app.quest_labels()
+            quest = self.container().get("RequiredQuestID", -1)
+            self.stage_quest.set(self.app.quest_label(quest)
+                                 if quest and quest > 0 else "")
+            self.stage_priority_row.pack(fill="x", pady=(4, 0))
+            self.stage_vars_row.pack(fill="x", pady=(4, 0))
+            self.stage_priority.delete(0, tk.END)
+            self.stage_priority.insert(
+                0, str(safe_int(self.container().get("Priority", 0), 0)))
+            self.stage_vars.set_ops(self.container().get("RequiredVars"))
+        else:
+            self.stage_quest.set("")
+            self.stage_quest.configure(state="disabled")
+            self.stage_priority_row.pack_forget()
+            self.stage_vars_row.pack_forget()
+
+    def on_tree_changed(self, _event=None):
+        self.current_stage_index = self.tree_selector.current() - 1
+        self.current_node = None
+        self.current_response = None
+        self.refresh_tree_selector()
+        self.refresh_outline()
+        self.refresh_map()
+
+    def on_stage_quest_changed(self, _event=None):
+        if self.current_stage_index < 0:
+            return
+        self.container()["RequiredQuestID"] = max(
+            -1, quest_id_from_label(self.stage_quest.get(), -1))
+        self.tree_selector["values"] = self.tree_labels()
+        self.tree_selector.current(self.current_stage_index + 1)
+        self.mark_dirty()
+
+    def on_stage_priority_changed(self, _event=None):
+        if self.current_stage_index < 0:
+            return
+        self.container()["Priority"] = safe_int(self.stage_priority.get(), 0)
+        self.mark_dirty()
+
+    def on_stage_vars_changed(self):
+        if self.current_stage_index < 0:
+            return
+        self.container()["RequiredVars"] = self.stage_vars.get_ops()
+        self.mark_dirty()
+
+    def add_tree(self):
+        stages = self.tree.setdefault("Stages", [])
+        stages.append({
+            "RequiredQuestID": -1,
+            "RootNodeID": 1,
+            "Nodes": [new_node(1)],
+        })
+        self.current_stage_index = len(stages) - 1
+        self.current_node = None
+        self.current_response = None
+        self.refresh_tree_selector()
+        self.refresh_outline()
+        self.refresh_map()
+        self.mark_dirty()
+        self.stage_quest.focus_set()
+
+    def remove_tree(self):
+        if self.current_stage_index < 0:
+            messagebox.showinfo(
+                APP_TITLE, "Tree 1 is the base tree and can't be removed.",
+                parent=self)
+            return
+        stages = self.tree.get("Stages") or []
+        idx = self.current_stage_index
+        if not (0 <= idx < len(stages)):
+            return
+        quest = stages[idx].get("RequiredQuestID", -1)
+        if not messagebox.askyesno(
+                APP_TITLE, "Delete Tree %d (after quest %s) and every node in "
+                "it?" % (idx + 2, quest), parent=self):
+            return
+        del stages[idx]
+        self.current_stage_index = -1
+        self.current_node = None
+        self.current_response = None
+        self.refresh_tree_selector()
+        self.refresh_outline()
+        self.refresh_map()
+        self.mark_dirty()
+
     def _build_editors(self, parent):
         scroll = ScrollFrame(parent)
         scroll.pack(fill="both", expand=True)
@@ -2004,8 +2427,6 @@ class DialogueTab(ttk.Frame):
         self.speaker_text.bind("<KeyRelease>", lambda _e: self.commit_speaker())
         attach_text_spellcheck(self.speaker_text)
 
-        # Optional / advanced node bits stay folded so a basic node is just an
-        # ID, a type and a line of speech.
         voice_section = CollapsibleSection(
             node_box, "Voice lines for this node  (optional)")
         voice_section.pack(fill="x", padx=6, pady=(0, 4))
@@ -2043,8 +2464,6 @@ class DialogueTab(ttk.Frame):
         ttk.Button(tools, text="\u2193", width=3,
                    command=lambda: self.move_response(1)).pack(side="left")
 
-        # Every control sits in column 1 next to its own label, so nothing
-        # gets flung to the far edge on a wide window.
         fields = ttk.Frame(editor)
         fields.pack(fill="x", padx=6, pady=4)
         fields.columnconfigure(1, weight=1)
@@ -2086,8 +2505,6 @@ class DialogueTab(ttk.Frame):
         ttk.Button(next_row, text="Jump to", width=9,
                    command=self.jump_to_next).pack(side="left", padx=6)
 
-        # Gating is advanced and rarely used, so it folds away under the core
-        # button text / action / next-node fields.
         gate_section = CollapsibleSection(
             editor, "Show only after a quest completes  (optional)")
         gate_section.pack(fill="x", padx=6, pady=(2, 6))
@@ -2105,6 +2522,90 @@ class DialogueTab(ttk.Frame):
         self.gate_note = ttk.Label(gate_box, text="", wraplength=430,
                                    style="Hint.TLabel")
         self.gate_note.pack(anchor="w", padx=6, pady=(0, 4))
+
+        var_section = CollapsibleSection(
+            editor, "Reputation & story flags  (optional)")
+        var_section.pack(fill="x", padx=6, pady=(2, 6))
+        var_box = var_section.content()
+
+        ttk.Label(
+            var_box,
+            text="Pick a character or faction from the dropdown to change or "
+                 "check their reputation - the list fills from your NPCs and "
+                 "factions. (You can still type a custom flag if you want one.) "
+                 "Points start at 0.",
+            wraplength=430, style="Hint.TLabel").pack(anchor="w", padx=6,
+                                                      pady=(4, 2))
+
+        ttk.Label(var_box, text="When this option is picked:",
+                  style="Accent.TLabel").pack(anchor="w", padx=6, pady=(4, 0))
+        self.set_vars = VarOpEditor(var_box, "set",
+                                    on_change=self.commit_response,
+                                    name_provider=self.app.known_reputations)
+        self.set_vars.pack(fill="x", padx=6, pady=(0, 4))
+
+        ttk.Label(var_box, text="Only show this option if:",
+                  style="Accent.TLabel").pack(anchor="w", padx=6, pady=(4, 0))
+        self.require_vars = VarOpEditor(var_box, "condition",
+                                        on_change=self.commit_response,
+                                        name_provider=self.app.known_reputations)
+        self.require_vars.pack(fill="x", padx=6, pady=(0, 6))
+
+        quick = ttk.Frame(var_box)
+        quick.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(quick, text="+ change this character's reputation",
+                   command=self.add_rep_change).pack(side="left")
+        ttk.Button(quick, text="+ require this character's reputation",
+                   command=self.add_rep_condition).pack(side="left", padx=6)
+
+        limit = ttk.Frame(var_box)
+        limit.pack(fill="x", padx=6, pady=(2, 6))
+        ttk.Label(limit, text="Max times a player can pick this "
+                  "(0 = unlimited)").pack(side="left")
+        self.max_uses = ttk.Spinbox(limit, from_=0, to=100000, width=7,
+                                    command=self.commit_response)
+        self.max_uses.pack(side="left", padx=(4, 0))
+        self.max_uses.bind("<KeyRelease>", lambda _e: self.commit_response())
+        ttk.Label(
+            var_box,
+            text="Stops rep-farming: after this many picks (per player, ever) "
+                 "the option disappears. 1 = one-time only.",
+            wraplength=430, style="Hint.TLabel").pack(anchor="w", padx=6,
+                                                      pady=(0, 4))
+
+    def _on_reputation_typed(self):
+        self._refresh_rep_hint()
+        self.mark_dirty()
+
+    def _refresh_rep_hint(self):
+        if not hasattr(self, "rep_key_hint"):
+            return
+        key = rep_key_from_name(self.reputation_var.get())
+        self.rep_key_hint.configure(text=("saved as: " + key) if key else "")
+
+    def _character_rep_name(self):
+        rep = rep_key_from_name(self.reputation_var.get())
+        if not rep:
+            messagebox.showinfo(
+                APP_TITLE,
+                "Give this character a name first, in the \"This character's "
+                "reputation\" box on the \"Who it's for & voice lines\" tab.",
+                parent=self)
+        return rep
+
+    def add_rep_change(self):
+        if not self.current_response:
+            return
+        rep = self._character_rep_name()
+        if rep:
+            self.set_vars.add_row(rep, "INCREASE", 1)
+
+    def add_rep_condition(self):
+        if not self.current_response:
+            return
+        rep = self._character_rep_name()
+        if rep:
+            self.require_vars.add_row(rep, "AT_LEAST", 1)
 
     def _build_map(self, parent):
         box = ttk.LabelFrame(parent, text="Branch map",
@@ -2134,7 +2635,6 @@ class DialogueTab(ttk.Frame):
             style="Hint.TLabel")
         self.map_legend.pack(anchor="w", padx=8, pady=(2, 6))
 
-    # --- state plumbing
 
     def mark_dirty(self, *_args):
         if self.loading:
@@ -2162,8 +2662,6 @@ class DialogueTab(ttk.Frame):
         if node.get("Type") and node.get("Type") != "STANDARD":
             note = "Node type: %s" % node.get("Type")
 
-        # Show the main line, or the first extra line if there's no main one,
-        # and flag that the mod picks one of several at random.
         line = node.get("SpeakerText") or ""
         extra = node.get("SpeakerLines") or []
         if extra:
@@ -2186,8 +2684,6 @@ class DialogueTab(ttk.Frame):
             line, buttons, note)
 
     def speaker_label(self):
-        """Who is talking, for the preview header - the NPC's name when we can
-        resolve it, so it reads 'NPC 2 "Steve"' instead of a file name."""
         kind = self.target_kind.get()
         key = self.folder_key.get().strip()
         if kind == "NPC" and key:
@@ -2198,7 +2694,6 @@ class DialogueTab(ttk.Frame):
         return (self.file_name.get() or "NPC").replace(".json", "")
 
     def browse_npcs(self):
-        """Pick a quest NPC by name instead of by ID."""
         if not self.app.ensure_quest_folder():
             return
         if not self.app.npc_index:
@@ -2231,6 +2726,8 @@ class DialogueTab(ttk.Frame):
                 text="The 'ID' field from your QuestNPC_X.json. NPCIDs stays "
                      "empty in the file - the mod infers it from the folder.")
             self.trader_frame.pack_forget()
+            self.ai_frame.pack_forget()
+            self.key_entry.state(["!disabled"])
             self.pick_npc_button.state(["!disabled"])
         elif kind == "TRADER":
             self.key_label.configure(text="Trader definition name")
@@ -2238,6 +2735,18 @@ class DialogueTab(ttk.Frame):
                 text="The trader's file name, e.g. Weapons. Open the trader "
                      "in game and the client log prints fileName=...")
             self.trader_frame.pack(fill="x", pady=(6, 0))
+            self.ai_frame.pack_forget()
+            self.key_entry.state(["!disabled"])
+            self.pick_npc_button.state(["disabled"])
+        elif kind == "AI":
+            self.key_label.configure(text="(matched by DialogueID below)")
+            self.key_hint.configure(
+                text="Talkable AI are spawned via AIPatrol\\AIPatrols.json and "
+                     "matched by DialogueID, not a folder ID. Saved to "
+                     "Dialogues\\AI\\.")
+            self.trader_frame.pack_forget()
+            self.ai_frame.pack(fill="x", pady=(6, 0))
+            self.key_entry.state(["disabled"])
             self.pick_npc_button.state(["disabled"])
         else:
             self.key_label.configure(text="NPC IDs (comma separated)")
@@ -2245,7 +2754,21 @@ class DialogueTab(ttk.Frame):
                 text="Shared trees MUST list every NPC ID explicitly, "
                      "e.g. 12, 13, 14")
             self.trader_frame.pack_forget()
+            self.ai_frame.pack_forget()
+            self.key_entry.state(["!disabled"])
             self.pick_npc_button.state(["!disabled"])
+
+        self.refresh_action_values()
+        is_ai = kind == "AI"
+        try:
+            if is_ai and self.inner.select() == str(self.quest_talk_page):
+                self.inner.select(self.flow_page)
+            self.inner.tab(
+                self.quest_talk_page,
+                state=("disabled" if is_ai else "normal"))
+        except Exception:
+            pass
+
         self.update_path_preview()
         self.mark_dirty()
 
@@ -2260,6 +2783,15 @@ class DialogueTab(ttk.Frame):
         elif kind == "TRADER":
             folder = "Trader_%s" % (key or "?")
             who = "trader %s" % (key or "?")
+        elif kind == "AI":
+            folder = "AI"
+            pid = safe_int(self.ai_patrol_id.get(), 0) if hasattr(
+                self, "ai_patrol_id") else 0
+            sid = safe_int(self.ai_sub_id.get(), 0) if hasattr(
+                self, "ai_sub_id") else 0
+            who = "AI patrol %s" % (pid or "?")
+            if sid > 0:
+                who += " unit %s" % sid
         else:
             folder = "Shared"
             who = "shared (%s)" % (key or "no IDs yet")
@@ -2267,6 +2799,8 @@ class DialogueTab(ttk.Frame):
         if not name.lower().endswith(".json"):
             name += ".json"
         self.preview_path = os.path.join(root, "Dialogues", folder, name)
+        if getattr(self, "source_path", None):
+            self.preview_path = self.source_path
         self.path_preview.configure(text="Saves to: " + self.preview_path)
         self.summary.configure(
             text="%s   \u2192   Dialogues\\%s\\%s" % (who, folder, name))
@@ -2309,6 +2843,16 @@ class DialogueTab(ttk.Frame):
         if kind != "TRADER":
             self.tree["TraderClassNames"] = []
             self.tree["TraderPositions"] = []
+        if kind == "AI":
+            self.tree["AIPatrolID"] = safe_int(self.ai_patrol_id.get(), 0)
+            self.tree["AIPatrolSubID"] = safe_int(self.ai_sub_id.get(), 0)
+        else:
+            self.tree["AIPatrolID"] = 0
+            self.tree["AIPatrolSubID"] = 0
+        if hasattr(self, "reputation_var"):
+            self.tree["ReputationVar"] = rep_key_from_name(
+                self.reputation_var.get())
+            self.tree["ReputationTiers"] = self.rep_tiers.get_tiers()
         self.tree["GreetingVoiceLineIDs"] = self.greeting.get_items()
         self.tree["FarewellVoiceLineIDs"] = self.farewell.get_items()
         self.tree["QuestListTexts"] = self.quest_prompt.get_items()
@@ -2340,14 +2884,23 @@ class DialogueTab(ttk.Frame):
         self.radius.delete(0, tk.END)
         self.radius.insert(0, str(self.tree.get("TraderPositionRadius", 8.0)))
         self.min_keys.set(str(self.tree.get("TraderMinKeyMatches", 2)))
+        self.ai_patrol_id.delete(0, tk.END)
+        self.ai_patrol_id.insert(0, str(safe_int(self.tree.get("AIPatrolID", 0), 0)))
+        self.ai_sub_id.delete(0, tk.END)
+        self.ai_sub_id.insert(0, str(safe_int(self.tree.get("AIPatrolSubID", 0), 0)))
+        self.reputation_var.delete(0, tk.END)
+        self.reputation_var.insert(
+            0, rep_label_from_key(self.tree.get("ReputationVar", "") or ""))
+        self._refresh_rep_hint()
+        self.rep_tiers.set_tiers(self.tree.get("ReputationTiers"))
         self.loading = False
         self.on_target_change()
+        self.refresh_tree_selector()
         self.refresh_outline()
 
-    # --- outline
 
     def node_index(self, node):
-        return self.tree["Nodes"].index(node)
+        return self.container()["Nodes"].index(node)
 
     @staticmethod
     def short(text, limit=40):
@@ -2367,7 +2920,6 @@ class DialogueTab(ttk.Frame):
 
     def refresh_outline(self, keep_node=None, keep_response=None,
                         reload_editors=True):
-        """Rebuild the outline tree, then reselect what was being edited."""
         if keep_node is None and self.current_node is not None:
             keep_node = self.current_node.get("ID")
         if keep_response is None and self.current_response is not None \
@@ -2379,18 +2931,19 @@ class DialogueTab(ttk.Frame):
                 keep_response = None
 
         self.outline.delete(*self.outline.get_children())
-        root_id = self.tree.get("RootNodeID")
+        nodes = self.container()["Nodes"]
+        root_id = self.container().get("RootNodeID")
 
-        for n_index, node in enumerate(self.tree["Nodes"]):
-            marker = "\u25b6 " if node.get("ID") == root_id else ""
+        for n_index, node in enumerate(nodes):
+            node_id = node.get("ID")
+            marker = "\u25b6 " if node_id == root_id else ""
             flag = "" if node.get("Type") == "STANDARD" else \
                 "  [%s]" % node.get("Type")
             label = "%sNode %s - %s%s" % (
-                marker, node.get("ID"), self.short(node.get("SpeakerText")),
-                flag)
+                marker, node_id, self.short(node.get("SpeakerText")), flag)
             self.outline.insert(
                 "", "end", iid="n%d" % n_index, text=label,
-                values=("start" if node.get("ID") == root_id else "",),
+                values=("start" if node_id == root_id else "",),
                 open=True, tags=("node",))
 
             for r_index, response in enumerate(node.get("Responses", [])):
@@ -2404,18 +2957,18 @@ class DialogueTab(ttk.Frame):
                     values=(self.response_target_label(response),),
                     tags=("response",))
 
-        ids = [str(n.get("ID", 0)) for n in self.tree["Nodes"]]
+        ids = [str(n.get("ID", 0)) for n in nodes]
         self.root_node["values"] = ids
-        self.root_node.set(str(self.tree.get("RootNodeID", 1)))
+        self.root_node.set(str(root_id if root_id is not None else 1))
 
-        if not self.tree["Nodes"]:
+        if not nodes:
             self.current_node = None
             self.current_response = None
             self.refresh_map()
             return
 
         index = 0
-        for position, node in enumerate(self.tree["Nodes"]):
+        for position, node in enumerate(nodes):
             if node.get("ID") == keep_node:
                 index = position
                 break
@@ -2432,7 +2985,6 @@ class DialogueTab(ttk.Frame):
             self.load_from_iid(iid)
 
     def load_from_iid(self, iid):
-        """Point the editor panels at whatever this outline row is."""
         if iid.startswith("n"):
             self.select_node(int(iid[1:]))
             self.current_response = None
@@ -2447,9 +2999,6 @@ class DialogueTab(ttk.Frame):
         if not selection:
             return
         iid = selection[0]
-        # A rebuild re-selects the same row and fires this event again.
-        # Reloading there would yank the caret out of whatever the user is
-        # mid-way through typing, so ignore it.
         if iid == self._loaded_iid:
             return
         self._loaded_iid = iid
@@ -2457,14 +3006,9 @@ class DialogueTab(ttk.Frame):
         self.refresh_map()
 
     def _outline_right_click(self, event):
-        """Edit or delete whatever outline row was right-clicked, so deleting a
-        node vs an option is one menu on the thing itself - not two buttons in
-        different corners that are easy to mix up."""
         iid = self.outline.identify_row(event.y)
         if not iid:
             return
-        # Select and load the clicked row first, so the menu's actions and the
-        # editor both operate on it.
         self.outline.selection_set(iid)
         if iid != self._loaded_iid:
             self._loaded_iid = iid
@@ -2473,8 +3017,11 @@ class DialogueTab(ttk.Frame):
 
         menu = tk.Menu(self, tearoff=0)
         if iid.startswith("n"):
+            n_index = int(iid[1:])
             menu.add_command(label="Edit this node",
                              command=lambda: self._outline_edit(iid))
+            menu.add_separator()
+            self._add_copy_to_tree_menu(menu, n_index)
             menu.add_separator()
             menu.add_command(label="Delete this node", command=self.delete_node)
         else:
@@ -2485,19 +3032,86 @@ class DialogueTab(ttk.Frame):
                              command=self.delete_response)
         _popup_menu(menu, event)
 
+    def _add_copy_to_tree_menu(self, menu, n_index):
+        others = [i for i in range(-1, len(self.tree.get("Stages") or []))
+                  if i != self.current_stage_index]
+        if not others:
+            return
+
+        def tree_name(idx):
+            return "Tree 1" if idx < 0 else "Tree %d" % (idx + 2)
+
+        node_menu = tk.Menu(menu, tearoff=0)
+        branch_menu = tk.Menu(menu, tearoff=0)
+        for idx in others:
+            node_menu.add_command(
+                label=tree_name(idx),
+                command=lambda t=idx: self.copy_node_to_tree(n_index, t, False))
+            branch_menu.add_command(
+                label=tree_name(idx),
+                command=lambda t=idx: self.copy_node_to_tree(n_index, t, True))
+        menu.add_cascade(label="Copy node to", menu=node_menu)
+        menu.add_cascade(label="Copy node + its branch to", menu=branch_menu)
+
+    def copy_node_to_tree(self, n_index, target_index, with_branch):
+        src_nodes = self.container()["Nodes"]
+        if not (0 <= n_index < len(src_nodes)):
+            return
+        target = (self.tree if target_index < 0
+                  else self.tree["Stages"][target_index])
+        target_nodes = target.setdefault("Nodes", [])
+
+        to_copy = [src_nodes[n_index]]
+        if with_branch:
+            by_id = {n.get("ID"): n for n in src_nodes}
+            seen = {src_nodes[n_index].get("ID")}
+            queue = [src_nodes[n_index]]
+            while queue:
+                node = queue.pop()
+                for resp in node.get("Responses", []):
+                    if resp.get("ActionType", "NONE") != "NONE":
+                        continue
+                    nxt = resp.get("NextNodeID", -1)
+                    if nxt and nxt > 0 and nxt not in seen and nxt in by_id:
+                        seen.add(nxt)
+                        child = by_id[nxt]
+                        to_copy.append(child)
+                        queue.append(child)
+
+        used = {n.get("ID", 0) for n in target_nodes}
+        next_id = (max(used) + 1) if used else 1
+        id_map = {}
+        for node in to_copy:
+            id_map[node.get("ID")] = next_id
+            next_id += 1
+
+        for node in to_copy:
+            clone = copy.deepcopy(node)
+            clone["ID"] = id_map[node.get("ID")]
+            for resp in clone.get("Responses", []):
+                if resp.get("ActionType", "NONE") == "NONE":
+                    old = resp.get("NextNodeID", -1)
+                    if old in id_map:
+                        resp["NextNodeID"] = id_map[old]
+            target_nodes.append(clone)
+
+        self.mark_dirty()
+        messagebox.showinfo(
+            APP_TITLE, "Copied %d node(s) into %s." % (
+                len(to_copy),
+                "Tree 1" if target_index < 0 else "Tree %d" % (target_index + 2)),
+            parent=self)
+
     def _outline_edit(self, iid):
-        """The row is already loaded into the editor; drop the cursor into the
-        main field for that row so 'Edit' goes straight to typing."""
         if iid.startswith("n"):
             self.speaker_text.focus_set()
         else:
             self.response_text.focus_set()
             self.response_text.icursor(tk.END)
 
-    # --- node editing
 
     def select_node(self, index):
-        self.current_node = self.tree["Nodes"][index]
+        self.current_node = self.container()["Nodes"][index]
         self.loading = True
         self.node_id.delete(0, tk.END)
         self.node_id.insert(0, str(self.current_node.get("ID", 0)))
@@ -2517,13 +3131,13 @@ class DialogueTab(ttk.Frame):
         self.mark_dirty()
 
     def on_root_changed(self, _event=None):
-        self.tree["RootNodeID"] = safe_int(self.root_node.get(), 1)
+        self.container()["RootNodeID"] =safe_int(self.root_node.get(), 1)
         self.refresh_outline()
         self.refresh_map()
         self.mark_dirty()
 
     def next_free_node_id(self):
-        used = {n.get("ID", 0) for n in self.tree["Nodes"]}
+        used = {n.get("ID", 0) for n in self.container()["Nodes"]}
         candidate = 1
         while candidate in used:
             candidate += 1
@@ -2531,7 +3145,7 @@ class DialogueTab(ttk.Frame):
 
     def add_node(self):
         node = new_node(self.next_free_node_id())
-        self.tree["Nodes"].append(node)
+        self.container()["Nodes"].append(node)
         self.current_response = None
         self.refresh_outline(keep_node=node["ID"], keep_response=None)
         self.refresh_map()
@@ -2542,7 +3156,7 @@ class DialogueTab(ttk.Frame):
             return
         clone = copy.deepcopy(self.current_node)
         clone["ID"] = self.next_free_node_id()
-        self.tree["Nodes"].append(clone)
+        self.container()["Nodes"].append(clone)
         self.current_response = None
         self.refresh_outline(keep_node=clone["ID"], keep_response=None)
         self.refresh_map()
@@ -2551,13 +3165,13 @@ class DialogueTab(ttk.Frame):
     def delete_node(self):
         if not self.current_node:
             return
-        if len(self.tree["Nodes"]) == 1:
+        if len(self.container()["Nodes"]) == 1:
             messagebox.showinfo(
                 APP_TITLE, "A tree needs at least one node.", parent=self)
             return
         node_id = self.current_node.get("ID")
         incoming = sum(
-            1 for n in self.tree["Nodes"] for r in n.get("Responses", [])
+            1 for n in self.container()["Nodes"] for r in n.get("Responses", [])
             if r.get("ActionType", "NONE") == "NONE"
             and r.get("NextNodeID") == node_id)
         message = "Delete node %s?" % node_id
@@ -2567,7 +3181,7 @@ class DialogueTab(ttk.Frame):
                         "'Check for problems' will flag them." % incoming)
         if not messagebox.askyesno(APP_TITLE, message, parent=self):
             return
-        self.tree["Nodes"].remove(self.current_node)
+        self.container()["Nodes"].remove(self.current_node)
         self.current_node = None
         self.current_response = None
         self.refresh_outline(keep_node=None, keep_response=None)
@@ -2585,7 +3199,7 @@ class DialogueTab(ttk.Frame):
                 APP_TITLE, "Node IDs start at 1 - 0 is treated as 'unset'.",
                 parent=self)
             new_id = 1
-        clash = [n for n in self.tree["Nodes"]
+        clash = [n for n in self.container()["Nodes"]
                  if n is not self.current_node and n.get("ID") == new_id]
         if clash:
             messagebox.showwarning(
@@ -2599,12 +3213,12 @@ class DialogueTab(ttk.Frame):
             return
         old_id = self.current_node.get("ID")
         self.current_node["ID"] = new_id
-        for node in self.tree["Nodes"]:
+        for node in self.container()["Nodes"]:
             for response in node.get("Responses", []):
                 if response.get("NextNodeID") == old_id:
                     response["NextNodeID"] = new_id
-        if self.tree.get("RootNodeID") == old_id:
-            self.tree["RootNodeID"] = new_id
+        if self.container().get("RootNodeID") == old_id:
+            self.container()["RootNodeID"] =new_id
         self.refresh_outline(keep_node=new_id)
         self.refresh_map()
         self.mark_dirty()
@@ -2638,10 +3252,14 @@ class DialogueTab(ttk.Frame):
         self.current_node["VoiceLineIDs"] = self.node_voice.get_items()
         self.mark_dirty()
 
-    # --- response editing
 
     def refresh_action_values(self):
-        values = list(ACTION_TYPES)
+        if self.target_kind.get() == "AI":
+            self.action_type["values"] = [
+                "NONE", "END_CONVERSATION", "RECRUIT_AI", "GO_HOSTILE"]
+            return
+        values = [a for a in ACTION_TYPES
+                  if a not in ("RECRUIT_AI", "GO_HOSTILE")]
         if self.show_advanced.get():
             values += ADVANCED_ACTION_TYPES
         self.action_type["values"] = values
@@ -2657,6 +3275,12 @@ class DialogueTab(ttk.Frame):
             text="Pick an option in the outline, or add one.")
         self.next_node.configure(state="disabled")
         self.gate_quest.configure(state="disabled")
+        if hasattr(self, "require_vars"):
+            self.set_vars.set_ops([])
+            self.require_vars.set_ops([])
+        if hasattr(self, "max_uses"):
+            self.max_uses.delete(0, tk.END)
+            self.max_uses.insert(0, "0")
         self.loading = False
 
     def select_response(self, index):
@@ -2678,7 +3302,7 @@ class DialogueTab(ttk.Frame):
         self.action_type.set(action)
 
         options = ["(end conversation)"] + \
-            [str(n.get("ID")) for n in self.tree["Nodes"]]
+            [str(n.get("ID")) for n in self.container()["Nodes"]]
         self.next_node["values"] = options
         target = response.get("NextNodeID", -1)
         self.next_node.set(str(target) if target and target > 0
@@ -2687,6 +3311,12 @@ class DialogueTab(ttk.Frame):
         gate = response.get("RequiredQuestID", -1)
         self.refresh_quest_choices()
         self.set_gate_value(gate)
+        if hasattr(self, "require_vars"):
+            self.set_vars.set_ops(response.get("SetVars"))
+            self.require_vars.set_ops(response.get("RequiredVars"))
+        if hasattr(self, "max_uses"):
+            self.max_uses.delete(0, tk.END)
+            self.max_uses.insert(0, str(safe_int(response.get("MaxUses", 0), 0)))
         self.loading = False
         self.update_action_state()
 
@@ -2726,7 +3356,6 @@ class DialogueTab(ttk.Frame):
                 text="Option stays hidden until this quest is COMPLETED.")
 
     def browse_quests(self):
-        """Pick a quest by name rather than remembering its number."""
         if not self.app.ensure_quest_folder():
             return
         if not self.app.quest_index:
@@ -2787,6 +3416,14 @@ class DialogueTab(ttk.Frame):
         else:
             response["RequiredQuestID"] = max(
                 1, quest_id_from_label(gate_text, 1))
+        if hasattr(self, "require_vars"):
+            response["SetVars"] = self.set_vars.get_ops()
+            response["RequiredVars"] = self.require_vars.get_ops()
+        if hasattr(self, "max_uses"):
+            uses = safe_int(self.max_uses.get(), 0)
+            response["MaxUses"] = uses
+            if uses > 0 and not response.get("UsesKey"):
+                response["UsesKey"] = "uses_" + uuid.uuid4().hex[:8]
         self.refresh_outline(reload_editors=False)
         self.refresh_map()
         self.mark_dirty()
@@ -2797,17 +3434,10 @@ class DialogueTab(ttk.Frame):
                 APP_TITLE, "Select a node first.", parent=self)
             return
         response = new_response()
-        # With no option selected the Button text box is a staging field for a
-        # new option, so a label typed there names it. (With an option selected
-        # the box is editing that option, so Add just makes a fresh default.)
         typed = self.response_text.get().strip()
         if typed and self.current_response is None:
             response["Text"] = typed
         self.current_node.setdefault("Responses", []).append(response)
-        # Deselect and clear so the box is ready to stage the NEXT option. If we
-        # left the new option selected, the box would stay bound to it and the
-        # next thing typed would overwrite it instead of starting a new one.
-        # Click the option in the outline to set its action or next node.
         self.current_response = None
         self.refresh_outline(keep_response=None)
         self.refresh_map()
@@ -2848,7 +3478,6 @@ class DialogueTab(ttk.Frame):
         self.mark_dirty()
 
     def jump_to_next(self):
-        """Select whatever node the current option leads to."""
         if not self.current_response:
             return
         if self.current_response.get("ActionType", "NONE") != "NONE":
@@ -2856,7 +3485,7 @@ class DialogueTab(ttk.Frame):
         target = self.current_response.get("NextNodeID", -1)
         if not target or target < 1:
             return
-        for index, node in enumerate(self.tree["Nodes"]):
+        for index, node in enumerate(self.container()["Nodes"]):
             if node.get("ID") == target:
                 self.current_response = None
                 self.refresh_outline(keep_node=target, keep_response=None)
@@ -2865,12 +3494,10 @@ class DialogueTab(ttk.Frame):
         messagebox.showinfo(
             APP_TITLE, "Node %d doesn't exist yet." % target, parent=self)
 
-    # --- branch map
 
     def layout_map(self):
-        """Assign every node a (column, row) using breadth-first depth."""
-        nodes_by_id = {n.get("ID"): n for n in self.tree["Nodes"]}
-        root = self.tree.get("RootNodeID")
+        nodes_by_id = {n.get("ID"): n for n in self.container()["Nodes"]}
+        root = self.container().get("RootNodeID")
 
         depth = {}
         if root in nodes_by_id:
@@ -2888,13 +3515,13 @@ class DialogueTab(ttk.Frame):
 
         reachable = set(depth)
         orphan_column = (max(depth.values()) + 1) if depth else 0
-        for node in self.tree["Nodes"]:
+        for node in self.container()["Nodes"]:
             if node.get("ID") not in depth:
                 depth[node.get("ID")] = orphan_column
 
         columns = {}
         placed = {}
-        for node in self.tree["Nodes"]:
+        for node in self.container()["Nodes"]:
             column = depth[node.get("ID")]
             row = columns.get(column, 0)
             columns[column] = row + 1
@@ -2912,9 +3539,9 @@ class DialogueTab(ttk.Frame):
         canvas.configure(background=skin["field"])
 
         placed, reachable, has_root = self.layout_map()
-        nodes_by_id = {n.get("ID"): n for n in self.tree["Nodes"]}
+        nodes_by_id = {n.get("ID"): n for n in self.container()["Nodes"]}
         current_id = self.current_node.get("ID") if self.current_node else None
-        root_id = self.tree.get("RootNodeID")
+        root_id = self.container().get("RootNodeID")
 
         def box_at(node_id):
             column, row = placed[node_id]
@@ -2922,13 +3549,12 @@ class DialogueTab(ttk.Frame):
             y = self.MARGIN + row * (self.BOX_H + self.GAP_Y)
             return x, y, x + self.BOX_W, y + self.BOX_H
 
-        # --- edges first so boxes sit on top
         highlight_target = None
         if self.current_response is not None \
                 and self.current_response.get("ActionType", "NONE") == "NONE":
             highlight_target = self.current_response.get("NextNodeID", -1)
 
-        for node in self.tree["Nodes"]:
+        for node in self.container()["Nodes"]:
             source_id = node.get("ID")
             if source_id not in placed:
                 continue
@@ -2955,7 +3581,7 @@ class DialogueTab(ttk.Frame):
                     smooth=True, arrow="last",
                     dash=() if not gated else (5, 3))
 
-        for node in self.tree["Nodes"]:
+        for node in self.container()["Nodes"]:
             node_id = node.get("ID")
             if node_id not in placed:
                 continue
@@ -2994,7 +3620,6 @@ class DialogueTab(ttk.Frame):
                     fill=skin["warn"], font=("Segoe UI", 9, "bold"))
                 self.map_boxes[mark] = node_id
 
-            # terminal actions hang off the right edge as small pills
             offset = 0
             for response in node.get("Responses", []):
                 action = response.get("ActionType", "NONE")
@@ -3036,7 +3661,6 @@ class DialogueTab(ttk.Frame):
                 self.refresh_map()
                 return
 
-    # --- load / save
 
     def build_output(self):
         self.pull_tree_header()
@@ -3054,27 +3678,52 @@ class DialogueTab(ttk.Frame):
                 self.tree.get("TraderPositionRadius", 8.0))
             out["TraderMinKeyMatches"] = safe_int(
                 self.tree.get("TraderMinKeyMatches", 2), 2)
+        if safe_int(self.tree.get("AIPatrolID", 0), 0) > 0:
+            out["AIPatrolID"] = safe_int(self.tree.get("AIPatrolID", 0), 0)
+            out["AIPatrolSubID"] = safe_int(self.tree.get("AIPatrolSubID", 0), 0)
+        if (self.tree.get("ReputationVar") or "").strip():
+            out["ReputationVar"] = self.tree.get("ReputationVar", "").strip()
+            out["ReputationTiers"] = [
+                {"Threshold": safe_int(t.get("Threshold", 0), 0),
+                 "Label": str(t.get("Label", ""))}
+                for t in (self.tree.get("ReputationTiers") or [])
+                if str(t.get("Label", "")).strip()
+            ]
         out["GreetingVoiceLineIDs"] = list(
             self.tree.get("GreetingVoiceLineIDs", []))
         out["FarewellVoiceLineIDs"] = list(
             self.tree.get("FarewellVoiceLineIDs", []))
-        out["QuestListTexts"] = list(self.tree.get("QuestListTexts", []))
-        out["NoQuestsTexts"] = list(self.tree.get("NoQuestsTexts", []))
-        out["NoQuestsBackTexts"] = list(
-            self.tree.get("NoQuestsBackTexts", []))
-        out["NoQuestsLeaveTexts"] = list(
-            self.tree.get("NoQuestsLeaveTexts", []))
-        out["NoQuestsVoiceLineIDs"] = list(
-            self.tree.get("NoQuestsVoiceLineIDs", []))
-        out["QuestListBackTexts"] = list(
-            self.tree.get("QuestListBackTexts", []))
-        out["OfferBackTexts"] = list(self.tree.get("OfferBackTexts", []))
-        out["InProgressBackTexts"] = list(
-            self.tree.get("InProgressBackTexts", []))
-        out["TurnInBackTexts"] = list(self.tree.get("TurnInBackTexts", []))
+        if kind != "AI":
+            out["QuestListTexts"] = list(self.tree.get("QuestListTexts", []))
+            out["NoQuestsTexts"] = list(self.tree.get("NoQuestsTexts", []))
+            out["NoQuestsBackTexts"] = list(
+                self.tree.get("NoQuestsBackTexts", []))
+            out["NoQuestsLeaveTexts"] = list(
+                self.tree.get("NoQuestsLeaveTexts", []))
+            out["NoQuestsVoiceLineIDs"] = list(
+                self.tree.get("NoQuestsVoiceLineIDs", []))
+            out["QuestListBackTexts"] = list(
+                self.tree.get("QuestListBackTexts", []))
+            out["OfferBackTexts"] = list(self.tree.get("OfferBackTexts", []))
+            out["InProgressBackTexts"] = list(
+                self.tree.get("InProgressBackTexts", []))
+            out["TurnInBackTexts"] = list(self.tree.get("TurnInBackTexts", []))
+        out["Stages"] = [
+            {
+                "RequiredQuestID": safe_int(s.get("RequiredQuestID", -1), -1),
+                "RootNodeID": safe_int(s.get("RootNodeID", 1), 1),
+                "Priority": safe_int(s.get("Priority", 0), 0),
+                "RequiredVars": clean_var_ops(s.get("RequiredVars")),
+                "Nodes": self._serialize_nodes(s.get("Nodes") or []),
+            }
+            for s in self.tree.get("Stages", [])
+        ]
+        out["Nodes"] = self._serialize_nodes(self.tree["Nodes"])
+        return out
 
-        nodes = []
-        for node in self.tree["Nodes"]:
+    def _serialize_nodes(self, nodes):
+        out_nodes = []
+        for node in nodes:
             entry = {
                 "ID": safe_int(node.get("ID", 1), 1),
                 "Type": node.get("Type", "STANDARD") or "STANDARD",
@@ -3084,47 +3733,55 @@ class DialogueTab(ttk.Frame):
             }
             speaker_lines = []
             for line in (node.get("SpeakerLines") or []):
-                text = line.get("Text", "")
                 gate = line.get("RequiredQuestID", -1)
                 override = line.get("OverrideQuestID", -1)
-                speaker_lines.append({
-                    "Text": text,
+                line_entry = {
+                    "Text": line.get("Text", ""),
                     "RequiredQuestID": gate if gate and gate > 0 else -1,
                     "OverrideQuestID": override if override and override > 0
                     else -1,
                     "VoiceLineIDs": list(line.get("VoiceLineIDs") or []),
-                })
-            # Only written when present, so untouched files stay byte-identical
-            # and older mod builds ignore what they never see.
+                }
+                req = clean_var_ops(line.get("RequiredVars"))
+                if req:
+                    line_entry["RequiredVars"] = req
+                speaker_lines.append(line_entry)
             if speaker_lines:
                 entry["SpeakerLines"] = speaker_lines
             for response in node.get("Responses", []):
                 action = response.get("ActionType", "NONE") or "NONE"
                 gate = response.get("RequiredQuestID", -1)
-                # every field written explicitly - omitted fields do NOT
-                # give you the documented default on load
-                entry["Responses"].append({
+                resp_entry = {
                     "Text": response.get("Text", ""),
                     "NextNodeID": safe_int(response.get("NextNodeID", -1), -1)
                     if action == "NONE" else -1,
                     "RequiredQuestID": gate if gate and gate > 0 else -1,
                     "ActionType": action,
-                })
-            nodes.append(entry)
-        out["Nodes"] = nodes
-        return out
+                }
+                req_vars = clean_var_ops(response.get("RequiredVars"))
+                if req_vars:
+                    resp_entry["RequiredVars"] = req_vars
+                set_vars = clean_var_ops(response.get("SetVars"))
+                if set_vars:
+                    resp_entry["SetVars"] = set_vars
+                max_uses = safe_int(response.get("MaxUses", 0), 0)
+                if max_uses > 0:
+                    resp_entry["MaxUses"] = max_uses
+                    resp_entry["UsesKey"] = (response.get("UsesKey", "")
+                                             or "uses_" + uuid.uuid4().hex[:8])
+                entry["Responses"].append(resp_entry)
+            out_nodes.append(entry)
+        return out_nodes
 
-    def load_tree(self, data, path=None):
-        self.tree = new_tree()
-        self.tree.update({k: v for k, v in data.items() if k != "Nodes"})
-        nodes = data.get("Nodes") or []
-        self.tree["Nodes"] = [
+    def _load_nodes(self, raw):
+        return [
             {
                 "ID": safe_int(n.get("ID", 1), 1),
                 "Type": n.get("Type", "STANDARD") or "STANDARD",
                 "SpeakerText": n.get("SpeakerText", ""),
                 "VoiceLineIDs": list(n.get("VoiceLineIDs") or []),
-                "Responses": [dict(r) for r in (n.get("Responses") or [])],
+                "Responses": [self._load_response(r)
+                              for r in (n.get("Responses") or [])],
                 "SpeakerLines": [
                     {
                         "Text": line.get("Text", ""),
@@ -3133,12 +3790,36 @@ class DialogueTab(ttk.Frame):
                         "OverrideQuestID": safe_int(
                             line.get("OverrideQuestID", -1), -1),
                         "VoiceLineIDs": list(line.get("VoiceLineIDs") or []),
+                        "RequiredVars": clean_var_ops(line.get("RequiredVars")),
                     }
                     for line in (n.get("SpeakerLines") or [])
                 ],
             }
-            for n in nodes
-        ] or [new_node(1)]
+            for n in (raw or [])
+        ]
+
+    def _load_response(self, r):
+        entry = dict(r)
+        entry["RequiredVars"] = clean_var_ops(r.get("RequiredVars"))
+        entry["SetVars"] = clean_var_ops(r.get("SetVars"))
+        return entry
+
+    def load_tree(self, data, path=None):
+        self.tree = new_tree()
+        self.tree.update(
+            {k: v for k, v in data.items() if k not in ("Nodes", "Stages")})
+        self.tree["Nodes"] = self._load_nodes(data.get("Nodes")) or [new_node(1)]
+        self.tree["Stages"] = [
+            {
+                "RequiredQuestID": safe_int(s.get("RequiredQuestID", -1), -1),
+                "RootNodeID": safe_int(s.get("RootNodeID", 1), 1),
+                "Priority": safe_int(s.get("Priority", 0), 0),
+                "RequiredVars": clean_var_ops(s.get("RequiredVars")),
+                "Nodes": self._load_nodes(s.get("Nodes")) or [new_node(1)],
+            }
+            for s in (data.get("Stages") or [])
+        ]
+        self.current_stage_index = -1
         self.source_path = path
         self.current_node = None
         self.current_response = None
@@ -3159,10 +3840,11 @@ class DialogueTab(ttk.Frame):
         elif data.get("TraderIDs"):
             self.target_kind.set("TRADER")
             self.folder_key.set(data["TraderIDs"][0])
+        if safe_int(data.get("AIPatrolID", 0), 0) > 0:
+            self.target_kind.set("AI")
         self.refresh_all()
         self.refresh_map()
 
-    # --- validation
 
     def validate(self):
         self.pull_tree_header()
@@ -3178,8 +3860,6 @@ class QuestTextTab(ttk.Frame):
     BACK_HINT = ("One button per line, each returns to the conversation. "
                  "Blank shows no back button on this screen.")
 
-    # Player-facing screens, grouped so one box = one in-game screen. Each
-    # screen carries its own "back to the conversation" wording.
     SCREEN_GROUPS = [
         ("Offer screen  —  quest not started", [
             ("AcceptTexts", "Accept  (Player says)",
@@ -3205,8 +3885,6 @@ class QuestTextTab(ttk.Frame):
         ]),
     ]
 
-    # Screens shown once this quest is completed - these override the NPC's
-    # Quest talk defaults.
     COMPLETED_GROUPS = [
         ("Quest list greeting  —  once this quest is completed", [
             ("QuestListTexts", "Line above their quest list  (NPC says)",
@@ -3238,8 +3916,6 @@ class QuestTextTab(ttk.Frame):
         self.current = None
         self.loading = False
         self.config_version = 0
-        # which field the cursor is in, so the live preview can show the
-        # matching in-game screen rather than guessing
         self.focus_key = "AcceptTexts"
         self.file_name = tk.StringVar(value="ServerQuests.json")
 
@@ -3289,15 +3965,9 @@ class QuestTextTab(ttk.Frame):
         ttk.Button(id_row, text="Browse quests...", width=16,
                    command=self.browse_quests).pack(side="left")
 
-        # Whose quest this wording is for, so you can tell at a glance which
-        # NPC you're writing lines for.
         self.quest_npc = ttk.Label(right, text="", style="Accent.TLabel")
         self.quest_npc.pack(anchor="w", pady=(0, 4))
 
-        # The two description lines the mod actually shows to players: line 1
-        # on offer (the giver) and line 3 on turn-in (the turn-in NPC). Line 2
-        # is only shown mid-quest and the mod overrides it, so it's left out.
-        # Both live in the Expansion quest file and are editable in place.
         self._desc_entry = None
         self.desc_box = ttk.LabelFrame(
             right, text="Preview from Expansion quest file",
@@ -3312,9 +3982,6 @@ class QuestTextTab(ttk.Frame):
 
         self.editors = {}
 
-        # One collapsible section per in-game screen, in the order a quest
-        # moves through them. The first (offer) opens by default; the rest stay
-        # tucked away so the tab isn't a wall of fields.
         for i, (title, specs) in enumerate(self.SCREEN_GROUPS):
             self._build_screen_box(right, title, specs, expanded=(i == 0))
 
@@ -3336,9 +4003,6 @@ class QuestTextTab(ttk.Frame):
             "<FocusIn>", lambda _e: self.set_focus_key("RewardSelectText"),
             add="+")
 
-        # Screens shown after this quest is completed. Their shared explanation
-        # and the impact line live inside the first completed section (quest
-        # list greeting) so nothing floats loose between the dropdowns.
         def completed_intro(box):
             ttk.Label(box,
                       text="After this quest is completed  —  overrides the "
@@ -3359,10 +4023,6 @@ class QuestTextTab(ttk.Frame):
 
     def _build_screen_box(self, parent, title, specs, expanded=False,
                           intro=None):
-        """One collapsible section holding the StringListEditors for a single
-        in-game screen. Registers each editor in self.editors by its field
-        key. intro(box), if given, adds leading widgets inside the section
-        before the fields."""
         section = CollapsibleSection(parent, title, expanded=expanded)
         section.pack(fill="x", padx=2, pady=(0, 4))
         box = section.content()
@@ -3386,11 +4046,6 @@ class QuestTextTab(ttk.Frame):
         return entry.get("desc", "") if entry else ""
 
     def _build_desc_editor(self, parent, base_title, index, role, cache_key):
-        """One read-only-until-Edit box for a single Descriptions[] line.
-
-        role picks whose name is shown ('giver' or 'turnin'); index is which
-        Descriptions slot Save writes; cache_key is where the value is kept on
-        the quest_index entry."""
         box = ttk.LabelFrame(parent, text=base_title)
         box.pack(fill="x", pady=(0, 4))
         text = tk.Text(box, height=3, wrap="word", state="disabled", undo=True)
@@ -3443,8 +4098,6 @@ class QuestTextTab(ttk.Frame):
             givers = self.app.npc_givers_label(quest_id) if quest_id > 0 else ""
             self.quest_npc.configure(
                 text=("Quest given by  " + givers) if givers else "")
-        # Name the turn-in NPC on the Hand it in box so a quest whose giver and
-        # turn-in differ can be told apart while you write its wording.
         if hasattr(self, "editors") and "TurnInTexts" in self.editors:
             base = next(lbl for key, lbl, _hint in self.all_list_fields
                         if key == "TurnInTexts")
@@ -3478,8 +4131,6 @@ class QuestTextTab(ttk.Frame):
             editor["save"].configure(state="disabled")
 
     def _completed_impact_text(self, quest_id):
-        """Whose quest list this quest's 'once completed' wording appears on,
-        and where it sits in each NPC's override chain."""
         entry = self.app.quest_lookup(quest_id) if quest_id > 0 else None
         if not entry:
             return ""
@@ -3513,8 +4164,6 @@ class QuestTextTab(ttk.Frame):
         return "\n".join(lines)
 
     def _desc_title(self, editor, quest_id):
-        """Box heading with whoever says the line, e.g.
-        'On offer  —  NPC 2 "Steve" says'."""
         who = ""
         if quest_id > 0:
             if editor["role"] == "giver":
@@ -3562,7 +4211,6 @@ class QuestTextTab(ttk.Frame):
         descriptions = data.get("Descriptions")
         if not isinstance(descriptions, list):
             descriptions = []
-        # The mod expects three lines; pad so writing line 3 never leaves gaps.
         while len(descriptions) <= index:
             descriptions.append("")
         descriptions[index] = new_text
@@ -3683,7 +4331,6 @@ class QuestTextTab(ttk.Frame):
 
     QUEST_TEXT_CONFIG_VERSION = 2
 
-    # which in-game screen each field appears on
     SCREENS = {
         "AcceptTexts": "offer",
         "DeclineTexts": "offer",
@@ -3726,7 +4373,6 @@ class QuestTextTab(ttk.Frame):
         screen = self.SCREENS.get(self.focus_key, "offer")
         active = self.focus_key
 
-        # which icon each field's buttons carry in game
         icons = {"AcceptTexts": "chat", "DeclineTexts": "chat",
                  "TurnInTexts": "chat", "NotYetTexts": "exit",
                  "InProgressTexts": "exit",
@@ -3759,7 +4405,6 @@ class QuestTextTab(ttk.Frame):
                 rows("InProgressTexts") + rows("InProgressBackTexts"))
 
         if screen == "turnin":
-            # Handed in to the turn-in NPC, who may not be the giver.
             turnin_speaker = speaker
             turnins = entry.get("turnins") if entry else None
             if turnins:
@@ -3814,9 +4459,6 @@ class QuestTextTab(ttk.Frame):
                 entry[key] = list(quest.get(key) or [])
             entry["RewardSelectText"] = quest.get("RewardSelectText", "")
             entries.append(entry)
-        # Stamp the version the mod uses to decide whether a file needs its
-        # new fields written in. Never lower one we loaded - a newer mod may
-        # have bumped it past what this build knows about.
         version = max(self.config_version, self.QUEST_TEXT_CONFIG_VERSION)
         return {"ConfigVersion": version, "Quests": entries}
 
@@ -4150,7 +4792,6 @@ class MenuConfigTab(ttk.Frame):
         if width < 50 or height < 50:
             return
 
-        # 16:9 screen rectangle centred in the canvas
         screen_w = width - 20
         screen_h = int(screen_w * 9 / 16)
         if screen_h > height - 20:
@@ -4241,8 +4882,6 @@ class MenuConfigTab(ttk.Frame):
 
 
 def icon_for_response(response):
-    """Same rule the mod uses: a NONE response with no next node closes the
-    menu too, so it earns the exit icon rather than the speech bubble."""
     action = response.get("ActionType") or "NONE"
     if action == "OPEN_TRADER":
         return "cart"
@@ -4254,16 +4893,12 @@ def icon_for_response(response):
 
 
 def draw_hint_icon(canvas, cx, cy, size, kind, colour):
-    """Small vector stand-in for the mod's response-button icons. Drawn with
-    canvas primitives rather than bitmaps so it tints with the theme and stays
-    legible at preview size."""
     if not kind:
         return
     half = size / 2.0
     w = max(1, int(round(size / 7.0)))
 
     if kind == "exit":
-        # door: three sides of a rectangle, open on the right
         left = cx - half
         right = cx - half * 0.15
         canvas.create_line(right, cy - half, left, cy - half,
@@ -4272,7 +4907,6 @@ def draw_hint_icon(canvas, cx, cy, size, kind, colour):
                            fill=colour, width=w)
         canvas.create_line(left, cy + half, right, cy + half,
                            fill=colour, width=w)
-        # arrow leaving through the gap
         canvas.create_line(cx - half * 0.35, cy, cx + half, cy,
                            fill=colour, width=w)
         canvas.create_line(cx + half * 0.35, cy - half * 0.45,
@@ -4304,7 +4938,6 @@ def draw_hint_icon(canvas, cx, cy, size, kind, colour):
                                fill=colour, outline=colour)
         return
 
-    # chat bubble
     canvas.create_rectangle(cx - half, cy - half * 0.85,
                             cx + half, cy + half * 0.25,
                             outline=colour, width=w)
@@ -4316,10 +4949,1081 @@ def draw_hint_icon(canvas, cx, cy, size, kind, colour):
 
 # ------------------------------------------------------------ live preview
 
+class AISettingsTab(ttk.Frame):
+
+    def __init__(self, master, app):
+        ttk.Frame.__init__(self, master)
+        self.app = app
+        self.loading = False
+
+        wrap = ttk.Frame(self)
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ttk.Label(
+            wrap,
+            text="What a talkable AI does after a GO_HOSTILE dialogue choice "
+                 "turns them on the player. Saved to AISettings.json. Only "
+                 "affects AI angered through dialogue.",
+            wraplength=560, style="Hint.TLabel").pack(anchor="w", pady=(0, 8))
+
+        box = ttk.LabelFrame(wrap, text="Let them calm down when the player…",
+                             style="Section.TLabelframe")
+        box.pack(fill="x")
+        self.reset_death = tk.BooleanVar(value=True)
+        self.reset_weapon = tk.BooleanVar(value=True)
+        self.reset_surrender = tk.BooleanVar(value=True)
+        self.reset_leave = tk.BooleanVar(value=True)
+        for var, label in [
+                (self.reset_death, "dies"),
+                (self.reset_weapon, "puts their weapon away"),
+                (self.reset_surrender, "puts their hands up (surrender)"),
+                (self.reset_leave, "leaves the area")]:
+            ttk.Checkbutton(box, text=label, variable=var,
+                            command=self._dirty).pack(anchor="w", padx=8, pady=1)
+
+        row = ttk.Frame(wrap)
+        row.pack(fill="x", pady=(8, 0))
+        ttk.Label(row, text="Leave-area distance (m)").pack(side="left")
+        self.leave_distance = ttk.Spinbox(row, from_=0, to=2000, increment=5,
+                                          width=8, command=self._dirty)
+        self.leave_distance.pack(side="left", padx=6)
+        ttk.Label(row, text="     Check every (seconds)").pack(side="left")
+        self.check_interval = ttk.Spinbox(row, from_=0.5, to=30, increment=0.5,
+                                          width=8, command=self._dirty)
+        self.check_interval.pack(side="left", padx=6)
+
+        perm = ttk.LabelFrame(
+            wrap, text="Permanent hostility (stops repeat offenders)",
+            style="Section.TLabelframe")
+        perm.pack(fill="x", pady=(10, 0))
+        ttk.Label(
+            perm,
+            text="After angering them this many times, that player is hostile "
+                 "for good and won't be forgiven. 0 = never permanent.",
+            wraplength=540, style="Hint.TLabel").pack(anchor="w", padx=8,
+                                                      pady=(4, 2))
+        prow = ttk.Frame(perm)
+        prow.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Label(prow, text="Threshold").pack(side="left")
+        self.threshold = ttk.Spinbox(prow, from_=0, to=100, width=6,
+                                     command=self._dirty)
+        self.threshold.pack(side="left", padx=(4, 12))
+        ttk.Label(prow, text="Remembered by").pack(side="left")
+        self.mode = ttk.Combobox(prow, values=["FACTION", "PATROL", "BOTH"],
+                                 width=10, state="readonly")
+        self.mode.pack(side="left", padx=4)
+        self.mode.bind("<<ComboboxSelected>>", lambda _e: self._dirty())
+
+        ttk.Button(wrap, text="Save global AI settings",
+                   command=lambda: self.app.save_current()).pack(
+            anchor="w", pady=(12, 0))
+
+        self.load(default_ai_settings())
+
+    def _dirty(self, *_args):
+        if self.loading:
+            return
+        self.app.mark_editor_dirty("Global AI settings")
+
+    def load(self, data):
+        self.loading = True
+        d = default_ai_settings()
+        self.reset_death.set(bool(data.get("ResetOnDeath", d["ResetOnDeath"])))
+        self.reset_weapon.set(
+            bool(data.get("ResetOnWeaponStowed", d["ResetOnWeaponStowed"])))
+        self.reset_surrender.set(
+            bool(data.get("ResetOnSurrender", d["ResetOnSurrender"])))
+        self.reset_leave.set(
+            bool(data.get("ResetOnLeaveArea", d["ResetOnLeaveArea"])))
+        self.leave_distance.delete(0, tk.END)
+        self.leave_distance.insert(0, str(safe_float(
+            data.get("LeaveAreaDistance", d["LeaveAreaDistance"]),
+            d["LeaveAreaDistance"])))
+        self.check_interval.delete(0, tk.END)
+        self.check_interval.insert(0, str(safe_float(
+            data.get("CheckInterval", d["CheckInterval"]), d["CheckInterval"])))
+        self.threshold.delete(0, tk.END)
+        self.threshold.insert(0, str(safe_int(
+            data.get("PersistentAggroThreshold", 0), 0)))
+        mode = str(data.get("PersistenceMode", "FACTION") or "FACTION").upper()
+        if mode not in ("FACTION", "PATROL", "BOTH"):
+            mode = "FACTION"
+        self.mode.set(mode)
+        self.loading = False
+
+    def build_output(self):
+        return {
+            "ResetOnDeath": 1 if self.reset_death.get() else 0,
+            "ResetOnWeaponStowed": 1 if self.reset_weapon.get() else 0,
+            "ResetOnLeaveArea": 1 if self.reset_leave.get() else 0,
+            "LeaveAreaDistance": safe_float(self.leave_distance.get(), 60.0),
+            "ResetOnSurrender": 1 if self.reset_surrender.get() else 0,
+            "PersistentAggroThreshold": safe_int(self.threshold.get(), 0),
+            "PersistenceMode": self.mode.get() or "FACTION",
+            "CheckInterval": safe_float(self.check_interval.get(), 2.0),
+        }
+
+    def output_path(self):
+        return os.path.join(self.app.profile_path.get() or "",
+                            "AISettings.json")
+
+    def validate(self):
+        return [], []
+
+
+PATROL_FACTIONS = ("Raiders", "Mercenaries", "West", "East", "Guards",
+                   "Civilian", "Passive")
+PATROL_FORMATIONS = ("RANDOM", "Column", "File", "Vee", "Wall", "Circle",
+                     "CircleDot", "InvColumn", "InvFile", "InvVee", "Star",
+                     "StarDot")
+PATROL_BEHAVIOURS = ("HALT", "LOOP", "ALTERNATE", "ONCE", "HALT_OR_LOOP",
+                     "HALT_OR_ALTERNATE", "LOOP_OR_ALTERNATE", "ROAMING",
+                     "ROAMING_LOCAL", "MIXED")
+PATROL_SPEEDS = ("STATIC", "WALK", "JOG", "SPRINT", "RANDOM",
+                 "RANDOM_NONSTATIC")
+PATROL_STANCES = ("STANDING", "CROUCHED", "PRONE")
+
+
+def default_patrol():
+    return {
+        "DialogueID": 0,
+        "PersistentAggroThreshold": -1,
+        "PersistenceMode": "",
+        "Name": "New talkable patrol",
+        "Persist": 0,
+        "Faction": "Guards",
+        "Formation": "Vee",
+        "FormationScale": 1.5,
+        "FormationLooseness": 0.1,
+        "Loadout": "",
+        "Units": [],
+        "NumberOfAI": 1,
+        "NumberOfAIMax": 0,
+        "Behaviour": "LOOP",
+        "LootingBehaviour": "",
+        "Speed": "WALK",
+        "UnderThreatSpeed": "SPRINT",
+        "DefaultStance": "STANDING",
+        "DefaultLookAngle": 0.0,
+        "CanBeLooted": 1,
+        "LootDropOnDeath": "",
+        "UnlimitedReload": 0,
+        "SniperProneDistanceThreshold": 0.0,
+        "AccuracyMin": -1.0,
+        "AccuracyMax": -1.0,
+        "ThreatDistanceLimit": -1.0,
+        "NoiseInvestigationDistanceLimit": -1.0,
+        "MaxFlankingDistance": -1.0,
+        "EnableFlankingOutsideCombat": -1,
+        "DamageMultiplier": -1.0,
+        "DamageReceivedMultiplier": -1.0,
+        "HeadshotResistance": 0.0,
+        "ShoryukenChance": 0.0,
+        "ShoryukenDamageMultiplier": 0.0,
+        "CanSpawnInContaminatedArea": 0,
+        "CanBeTriggeredByAI": 0,
+        "MinDistRadius": -1.0,
+        "MaxDistRadius": -1.0,
+        "DespawnRadius": -1.0,
+        "MinSpreadRadius": 0.0,
+        "MaxSpreadRadius": 0.0,
+        "Chance": 1.0,
+        "DespawnTime": -1.0,
+        "RespawnTime": -2.0,
+        "LoadBalancingCategory": "",
+        "ObjectClassName": "",
+        "WaypointInterpolation": "",
+        "UseRandomWaypointAsStartPoint": 1,
+        "Waypoints": [],
+    }
+
+
+class AIPatrolsTab(ttk.Frame):
+
+    PERM_CHOICES = ("Use server default", "Never permanent", "After a set number")
+    MODE_CHOICES = ("Use server default", "FACTION", "PATROL", "BOTH")
+
+    def __init__(self, master, app):
+        ttk.Frame.__init__(self, master)
+        self.app = app
+        self.loading = False
+        self.patrols = []
+        self.selected = -1
+        self.fields = {}
+        self._inputs = []
+
+        wrap = ttk.Frame(self)
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ttk.Label(
+            wrap,
+            text="Build talkable AI patrols (AIPatrol\\AIPatrols.json). This is "
+                 "a full patrol generator - the normal Expansion patrol fields "
+                 "plus the two links this mod adds (the dialogue tree it uses "
+                 "and how permanently it holds a grudge). Dropdowns are filled "
+                 "from Expansion's own script values.",
+            wraplength=620, style="Hint.TLabel").pack(anchor="w", pady=(0, 8))
+
+        body = ttk.Frame(wrap)
+        body.pack(fill="both", expand=True)
+
+        left = ttk.LabelFrame(body, text="Patrols", style="Section.TLabelframe")
+        left.pack(side="left", fill="y", padx=(0, 10))
+        self.listbox = tk.Listbox(left, width=32, height=18,
+                                  exportselection=False, activestyle="none")
+        self.listbox.pack(fill="y", expand=True, padx=6, pady=6)
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+
+        row = ttk.Frame(left)
+        row.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(row, text="New patrol", width=11,
+                   command=self._new_patrol).pack(side="left")
+        ttk.Button(row, text="Duplicate", width=10,
+                   command=self._duplicate).pack(side="left", padx=4)
+        row2 = ttk.Frame(left)
+        row2.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(row2, text="Remove", width=11,
+                   command=self._remove).pack(side="left")
+
+        scroll = ScrollFrame(body)
+        scroll.pack(side="left", fill="both", expand=True)
+        self.detail = scroll.inner
+
+        # ---- Identity & dialogue link
+        sec = self._section("Identity & dialogue link")
+        self._field(sec, "Name", "Name", "text", hint="just a label for you")
+        self._field(sec, "DialogueID", "Dialogue ID", "int",
+                    hint="match a dialogue tree's \"AIPatrolID\"")
+
+        # ---- Spawning
+        sec = self._section("Spawning")
+        self._field(sec, "Faction", "Faction", "combo", PATROL_FACTIONS,
+                    "or any faction your server defines")
+        self._field(sec, "Loadout", "Loadout", "text",
+                    "loadout json name; blank = faction default")
+        self._units_entry = self._simple(sec, "Units (classnames)",
+                                         "comma-separated; blank = faction default")
+        self._field(sec, "NumberOfAI", "Number of AI", "int")
+        self._field(sec, "NumberOfAIMax", "Number of AI (max)", "int",
+                    hint="0 = exactly the number above; >0 = random range")
+        self._field(sec, "Chance", "Spawn chance", "float", hint="0.0 - 1.0")
+        self._field(sec, "Persist", "Persist across restarts", "bool",
+                    hint="leave off for talkable patrols")
+        self._field(sec, "RespawnTime", "Respawn time (s)", "float",
+                    hint="-2 = Expansion default, -1 = never")
+        self._field(sec, "DespawnTime", "Despawn time (s)", "float",
+                    hint="-1 = never")
+        self._field(sec, "CanBeLooted", "Can be looted", "bool")
+        self._field(sec, "LootDropOnDeath", "Loot drop on death", "text")
+        self._field(sec, "CanSpawnInContaminatedArea",
+                    "Spawn in contaminated area", "bool")
+        self._field(sec, "CanBeTriggeredByAI", "Can be triggered by AI", "bool")
+
+        # ---- Movement & formation
+        sec = self._section("Movement & formation")
+        self._field(sec, "Behaviour", "Behaviour", "enum", PATROL_BEHAVIOURS)
+        self._field(sec, "Speed", "Speed", "enum", PATROL_SPEEDS)
+        self._field(sec, "UnderThreatSpeed", "Under-threat speed", "enum",
+                    PATROL_SPEEDS)
+        self._field(sec, "Formation", "Formation", "enum", PATROL_FORMATIONS)
+        self._field(sec, "FormationScale", "Formation scale", "float")
+        self._field(sec, "FormationLooseness", "Formation looseness", "float")
+        self._field(sec, "DefaultStance", "Default stance", "enum",
+                    PATROL_STANCES)
+        self._field(sec, "DefaultLookAngle", "Default look angle", "float")
+        self._field(sec, "UnlimitedReload", "Unlimited reload", "bool")
+        self._field(sec, "LootingBehaviour", "Looting behaviour", "text")
+
+        # ---- Spawn area & waypoints
+        sec = self._section("Spawn area")
+        self._field(sec, "MinDistRadius", "Min distance radius", "float",
+                    hint="-1 = Expansion default")
+        self._field(sec, "MaxDistRadius", "Max distance radius", "float")
+        self._field(sec, "DespawnRadius", "Despawn radius", "float")
+        self._field(sec, "MinSpreadRadius", "Min spread radius", "float")
+        self._field(sec, "MaxSpreadRadius", "Max spread radius", "float")
+        self._field(sec, "UseRandomWaypointAsStartPoint",
+                    "Random start waypoint", "bool")
+        self._field(sec, "WaypointInterpolation", "Waypoint interpolation",
+                    "text")
+        self._build_waypoints(self._section("Waypoints"))
+
+        # ---- Permanent hostility (this mod)
+        sec = self._section("Permanent hostility for this patrol")
+        ttk.Label(sec,
+                  text="Overrides the Global AI settings tab for this patrol "
+                       "only.", wraplength=460, style="Hint.TLabel").pack(
+            anchor="w", padx=8, pady=(0, 4))
+        prow = ttk.Frame(sec)
+        prow.pack(fill="x", padx=8)
+        self.perm = ttk.Combobox(prow, values=self.PERM_CHOICES, width=20,
+                                 state="readonly")
+        self.perm.pack(side="left")
+        self.perm.bind("<<ComboboxSelected>>", self._on_perm_change)
+        self.perm_count = ttk.Spinbox(prow, from_=1, to=100, width=5,
+                                      command=self._commit)
+        self.perm_count.pack(side="left", padx=(8, 2))
+        self.perm_count.bind("<KeyRelease>", self._commit)
+        ttk.Label(prow, text="bad runs").pack(side="left")
+        self._inputs.append((self.perm, "readonly"))
+
+        mrow = ttk.Frame(sec)
+        mrow.pack(fill="x", padx=8, pady=(6, 6))
+        ttk.Label(mrow, text="Remembered by", width=24, anchor="w").pack(
+            side="left")
+        self.mode = ttk.Combobox(mrow, values=self.MODE_CHOICES, width=18,
+                                 state="readonly")
+        self.mode.pack(side="left")
+        self.mode.bind("<<ComboboxSelected>>", self._commit)
+        self._inputs.append((self.mode, "readonly"))
+
+        ttk.Button(wrap, text="Save AI patrols",
+                   command=lambda: self.app.save_current()).pack(
+            anchor="w", pady=(10, 0))
+
+        self.load({"Patrols": []})
+
+    # ---- construction helpers
+
+    def _section(self, title):
+        frame = ttk.LabelFrame(self.detail, text=title,
+                               style="Section.TLabelframe")
+        frame.pack(fill="x", expand=True, padx=6, pady=(0, 8))
+        return frame
+
+    def _field(self, parent, key, label, kind, values=None, hint=None):
+        row = ttk.Frame(parent)
+        row.pack(fill="x", padx=8, pady=1)
+        ttk.Label(row, text=label, width=24, anchor="w").pack(side="left")
+        if kind == "bool":
+            var = tk.BooleanVar()
+            widget = ttk.Checkbutton(row, variable=var, command=self._commit)
+            widget.pack(side="left")
+            self.fields[key] = ("bool", var)
+            self._inputs.append((widget, "normal"))
+        elif kind in ("enum", "combo"):
+            state = "readonly" if kind == "enum" else "normal"
+            widget = ttk.Combobox(row, values=values, width=18, state=state)
+            widget.pack(side="left")
+            widget.bind("<<ComboboxSelected>>", self._commit)
+            if kind == "combo":
+                widget.bind("<KeyRelease>", self._commit)
+            self.fields[key] = (kind, widget)
+            self._inputs.append((widget, state))
+        else:
+            widget = ttk.Entry(row, width=16)
+            widget.pack(side="left")
+            widget.bind("<KeyRelease>", self._commit)
+            self.fields[key] = (kind, widget)
+            self._inputs.append((widget, "normal"))
+        if hint:
+            ttk.Label(row, text=hint, style="Hint.TLabel").pack(
+                side="left", padx=8)
+        return widget
+
+    def _simple(self, parent, label, hint=None):
+        row = ttk.Frame(parent)
+        row.pack(fill="x", padx=8, pady=1)
+        ttk.Label(row, text=label, width=24, anchor="w").pack(side="left")
+        widget = ttk.Entry(row, width=28)
+        widget.pack(side="left")
+        widget.bind("<KeyRelease>", self._commit)
+        self._inputs.append((widget, "normal"))
+        if hint:
+            ttk.Label(row, text=hint, style="Hint.TLabel").pack(
+                side="left", padx=8)
+        return widget
+
+    def _build_waypoints(self, parent):
+        ttk.Label(parent,
+                  text="Where the patrol lives. At least ONE waypoint is "
+                       "required - with none, the patrol does not spawn at all. "
+                       "One waypoint = spawns there and holds position. Extra "
+                       "waypoints = a route it walks. The first is the spawn "
+                       "point.",
+                  wraplength=460, style="Hint.TLabel").pack(
+            anchor="w", padx=8, pady=(0, 4))
+        mid = ttk.Frame(parent)
+        mid.pack(fill="x", padx=8)
+        self.wp_list = tk.Listbox(mid, height=6, exportselection=False,
+                                  activestyle="none")
+        self.wp_list.pack(side="left", fill="x", expand=True)
+        self.wp_list.bind("<<ListboxSelect>>", self._wp_on_select)
+        self._inputs.append((self.wp_list, "normal"))
+
+        entry = ttk.Frame(parent)
+        entry.pack(fill="x", padx=8, pady=(4, 2))
+        self.wp_x = ttk.Entry(entry, width=10)
+        self.wp_y = ttk.Entry(entry, width=10)
+        self.wp_z = ttk.Entry(entry, width=10)
+        for label, widget in (("X", self.wp_x), ("Y", self.wp_y),
+                              ("Z", self.wp_z)):
+            ttk.Label(entry, text=label).pack(side="left")
+            widget.pack(side="left", padx=(2, 8))
+            self._inputs.append((widget, "normal"))
+
+        buttons = ttk.Frame(parent)
+        buttons.pack(fill="x", padx=8, pady=(0, 6))
+        for text, cmd in (("Add", self._wp_add),
+                          ("Update selected", self._wp_update),
+                          ("Remove", self._wp_remove),
+                          ("Paste coords...", self._wp_paste)):
+            button = ttk.Button(buttons, text=text, command=cmd)
+            button.pack(side="left", padx=(0, 4))
+            self._inputs.append((button, "normal"))
+
+    # ---- state
+
+    def _dirty(self):
+        if self.loading:
+            return
+        self.app.mark_editor_dirty("AI patrols")
+
+    @staticmethod
+    def _label_for(index, patrol):
+        name = str(patrol.get("Name", "") or "").strip()
+        if not name:
+            name = "(patrol %d)" % (index + 1)
+        return "%s  [ID %s]" % (name, patrol.get("DialogueID", 0))
+
+    def _set_detail_state(self, on):
+        for widget, enabled in self._inputs:
+            widget.configure(state=(enabled if on else "disabled"))
+
+    def _sync_perm_count_state(self):
+        on = self.selected >= 0 and self.perm.get() == "After a set number"
+        self.perm_count.configure(state=("normal" if on else "disabled"))
+
+    def _set_entry(self, widget, text):
+        widget.delete(0, tk.END)
+        widget.insert(0, text)
+
+    def _refresh_list(self, keep):
+        self.listbox.delete(0, tk.END)
+        for i, patrol in enumerate(self.patrols):
+            self.listbox.insert(tk.END, self._label_for(i, patrol))
+        if 0 <= keep < len(self.patrols):
+            self.listbox.selection_clear(0, tk.END)
+            self.listbox.selection_set(keep)
+            self.selected = keep
+        else:
+            self.selected = -1
+
+    def _clear_detail(self):
+        self.loading = True
+        self._set_detail_state(True)
+        self._apply_to_widgets(default_patrol())
+        self._set_detail_state(False)
+        self.loading = False
+
+    # ---- events
+
+    def _on_select(self, _event=None):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        self.selected = sel[0]
+        self._populate(self.patrols[self.selected])
+
+    def _on_perm_change(self, _event=None):
+        self._sync_perm_count_state()
+        self._commit()
+
+    def _apply_to_widgets(self, patrol):
+        faction_kind, faction_widget = self.fields.get("Faction", (None, None))
+        if faction_widget is not None:
+            values = list(PATROL_FACTIONS)
+            for name in self.app.custom_faction_names():
+                if name and name not in values:
+                    values.append(name)
+            faction_widget.configure(values=values)
+
+        for key, (kind, holder) in self.fields.items():
+            if kind == "bool":
+                holder.set(bool(safe_int(patrol.get(key, 0), 0)))
+            elif kind in ("enum", "combo"):
+                holder.set(str(patrol.get(key, "") or ""))
+            elif kind == "int":
+                self._set_entry(holder, str(safe_int(patrol.get(key, 0), 0)))
+            elif kind == "float":
+                self._set_entry(holder,
+                                str(safe_float(patrol.get(key, 0.0), 0.0)))
+            else:
+                self._set_entry(holder, str(patrol.get(key, "") or ""))
+
+        units = patrol.get("Units") or []
+        self._set_entry(self._units_entry,
+                        ", ".join(str(u) for u in units))
+
+        threshold = safe_int(patrol.get("PersistentAggroThreshold", -1), -1)
+        self._set_entry(self.perm_count, "2")
+        if threshold < 0:
+            self.perm.set("Use server default")
+        elif threshold == 0:
+            self.perm.set("Never permanent")
+        else:
+            self.perm.set("After a set number")
+            self._set_entry(self.perm_count, str(threshold))
+
+        mode = str(patrol.get("PersistenceMode", "") or "").upper()
+        self.mode.set(mode if mode in ("FACTION", "PATROL", "BOTH")
+                      else "Use server default")
+
+        self._wp_refresh(patrol.get("Waypoints"))
+        self._set_entry(self.wp_x, "")
+        self._set_entry(self.wp_y, "")
+        self._set_entry(self.wp_z, "")
+
+    def _populate(self, patrol):
+        self.loading = True
+        self._set_detail_state(True)
+        self._apply_to_widgets(patrol)
+        self._sync_perm_count_state()
+        self.loading = False
+
+    def _commit(self, *_args):
+        if self.loading or self.selected < 0:
+            return
+        patrol = self.patrols[self.selected]
+        for key, (kind, holder) in self.fields.items():
+            if kind == "bool":
+                patrol[key] = 1 if holder.get() else 0
+            elif kind in ("enum", "combo"):
+                patrol[key] = holder.get()
+            elif kind == "int":
+                patrol[key] = safe_int(holder.get(), 0)
+            elif kind == "float":
+                patrol[key] = safe_float(holder.get(), 0.0)
+            else:
+                patrol[key] = holder.get()
+
+        units = [u.strip() for u in self._units_entry.get().split(",")
+                 if u.strip()]
+        patrol["Units"] = units
+
+        choice = self.perm.get()
+        if choice == "Never permanent":
+            patrol["PersistentAggroThreshold"] = 0
+        elif choice == "After a set number":
+            patrol["PersistentAggroThreshold"] = max(
+                1, safe_int(self.perm_count.get(), 1))
+        else:
+            patrol["PersistentAggroThreshold"] = -1
+
+        mode = self.mode.get()
+        patrol["PersistenceMode"] = mode if mode in ("FACTION", "PATROL",
+                                                     "BOTH") else ""
+
+        self.listbox.delete(self.selected)
+        self.listbox.insert(self.selected,
+                            self._label_for(self.selected, patrol))
+        self.listbox.selection_set(self.selected)
+        self._dirty()
+
+    # ---- waypoints
+
+    def _current_waypoints(self):
+        if self.selected < 0:
+            return None
+        patrol = self.patrols[self.selected]
+        if not isinstance(patrol.get("Waypoints"), list):
+            patrol["Waypoints"] = []
+        return patrol["Waypoints"]
+
+    def _wp_refresh(self, waypoints):
+        self.wp_list.delete(0, tk.END)
+        for point in (waypoints or []):
+            try:
+                self.wp_list.insert(
+                    tk.END, "%s,  %s,  %s" % (point[0], point[1], point[2]))
+            except Exception:
+                self.wp_list.insert(tk.END, str(point))
+
+    def _wp_on_select(self, _event=None):
+        waypoints = self._current_waypoints()
+        sel = self.wp_list.curselection()
+        if waypoints is None or not sel or sel[0] >= len(waypoints):
+            return
+        point = waypoints[sel[0]]
+        self._set_entry(self.wp_x, str(point[0]))
+        self._set_entry(self.wp_y, str(point[1]))
+        self._set_entry(self.wp_z, str(point[2]))
+
+    def _wp_read_entries(self):
+        return [safe_float(self.wp_x.get(), 0.0),
+                safe_float(self.wp_y.get(), 0.0),
+                safe_float(self.wp_z.get(), 0.0)]
+
+    def _wp_add(self):
+        waypoints = self._current_waypoints()
+        if waypoints is None:
+            return
+        waypoints.append(self._wp_read_entries())
+        self._wp_refresh(waypoints)
+        self._dirty()
+
+    def _wp_update(self):
+        waypoints = self._current_waypoints()
+        sel = self.wp_list.curselection()
+        if waypoints is None or not sel or sel[0] >= len(waypoints):
+            return
+        index = sel[0]
+        waypoints[index] = self._wp_read_entries()
+        self._wp_refresh(waypoints)
+        self.wp_list.selection_set(index)
+        self._dirty()
+
+    def _wp_remove(self):
+        waypoints = self._current_waypoints()
+        sel = self.wp_list.curselection()
+        if waypoints is None or not sel or sel[0] >= len(waypoints):
+            return
+        del waypoints[sel[0]]
+        self._wp_refresh(waypoints)
+        self._dirty()
+
+    def _wp_paste(self):
+        waypoints = self._current_waypoints()
+        if waypoints is None:
+            messagebox.showinfo(APP_TITLE, "Select or make a patrol first.")
+            return
+        window = tk.Toplevel(self)
+        window.title("Paste waypoint coordinates")
+        window.geometry("420x360")
+        ttk.Label(window,
+                  text="One waypoint per line - any format with three numbers "
+                       "works, e.g. 6424.15 18.33 2299.4 or "
+                       "[6424.15, 18.33, 2299.4].",
+                  wraplength=390, style="Hint.TLabel").pack(
+            anchor="w", padx=10, pady=8)
+        text = tk.Text(window, wrap="word", height=12)
+        text.pack(fill="both", expand=True, padx=10)
+
+        def do_add():
+            added = 0
+            for line in text.get("1.0", tk.END).splitlines():
+                nums = re.findall(r"-?\d+\.?\d*", line)
+                if len(nums) >= 3:
+                    waypoints.append([float(nums[0]), float(nums[1]),
+                                      float(nums[2])])
+                    added += 1
+            self._wp_refresh(waypoints)
+            if added:
+                self._dirty()
+            window.destroy()
+            self.set_status_safe("Added %d waypoint(s)." % added)
+
+        bar = ttk.Frame(window)
+        bar.pack(fill="x", padx=10, pady=8)
+        ttk.Button(bar, text="Add these", command=do_add).pack(side="left")
+        ttk.Button(bar, text="Cancel",
+                   command=window.destroy).pack(side="left", padx=6)
+        self.app.skin_window(window)
+
+    def set_status_safe(self, text):
+        try:
+            self.app.set_status(text)
+        except Exception:
+            pass
+
+    # ---- list actions
+
+    def _new_patrol(self):
+        patrol = default_patrol()
+        self.patrols.append(patrol)
+        self._refresh_list(keep=len(self.patrols) - 1)
+        self._populate(patrol)
+        self._dirty()
+
+    def _duplicate(self):
+        if self.selected < 0:
+            return
+        clone = copy.deepcopy(self.patrols[self.selected])
+        name = str(clone.get("Name", "") or "")
+        clone["Name"] = (name + " (copy)") if name else "(copy)"
+        self.patrols.insert(self.selected + 1, clone)
+        self._refresh_list(keep=self.selected + 1)
+        self._populate(clone)
+        self._dirty()
+
+    def _remove(self):
+        if self.selected < 0:
+            return
+        if not messagebox.askyesno(
+                APP_TITLE, "Remove this patrol from the file?"):
+            return
+        del self.patrols[self.selected]
+        keep = min(self.selected, len(self.patrols) - 1)
+        self._refresh_list(keep=keep)
+        if keep >= 0:
+            self._populate(self.patrols[keep])
+        else:
+            self._clear_detail()
+        self._dirty()
+
+    # ---- app hooks
+
+    def load(self, data):
+        self.loading = True
+        patrols = []
+        if isinstance(data, dict) and isinstance(data.get("Patrols"), list):
+            patrols = [p for p in data["Patrols"] if isinstance(p, dict)]
+        self.patrols = patrols
+        self._refresh_list(keep=0 if patrols else -1)
+        if patrols:
+            self._populate(patrols[0])
+        else:
+            self._clear_detail()
+        self.loading = False
+
+    def build_output(self):
+        return {"Patrols": self.patrols}
+
+    def output_path(self):
+        return os.path.join(self.app.profile_path.get() or "",
+                            "AIPatrol", "AIPatrols.json")
+
+    def validate(self):
+        issues = []
+        warnings = []
+        for i, patrol in enumerate(self.patrols):
+            label = self._label_for(i, patrol)
+            if safe_int(patrol.get("DialogueID", 0), 0) <= 0:
+                issues.append(
+                    "%s has no Dialogue ID - set it to 1 or higher, or the "
+                    "patrol has no tree to talk with." % label)
+            if not str(patrol.get("Faction", "") or "").strip():
+                warnings.append("%s has no Faction set." % label)
+            if safe_int(patrol.get("NumberOfAI", 0), 0) < 1:
+                warnings.append("%s spawns 0 AI (Number of AI is under 1)."
+                                % label)
+            waypoints = patrol.get("Waypoints")
+            if not isinstance(waypoints, list) or len(waypoints) == 0:
+                issues.append(
+                    "%s has no waypoints - it will NOT spawn. Add at least one "
+                    "(the first is the spawn point)." % label)
+        return issues, warnings
+
+
+FACTION_MAX_SLOTS = 32
+FACTION_STANCES = ("Friendly", "Guard", "Hostile")
+
+
+def default_faction():
+    return {
+        "Name": "New Faction",
+        "Loadout": "",
+        "PlayerStance": "FRIENDLY",
+        "FriendlyFactions": [],
+    }
+
+
+class FactionsTab(ttk.Frame):
+
+    def __init__(self, master, app):
+        ttk.Frame.__init__(self, master)
+        self.app = app
+        self.loading = False
+        self.factions = []
+        self.selected = -1
+
+        wrap = ttk.Frame(self)
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ttk.Label(
+            wrap,
+            text="Make your own AI factions (Factions\\Factions.json) and give "
+                 "them to talkable patrols on the AI patrols tab. Each gets a "
+                 "name, a loadout, how it treats players, and which other "
+                 "factions it won't fight. Up to %d factions." % FACTION_MAX_SLOTS,
+            wraplength=620, style="Hint.TLabel").pack(anchor="w", pady=(0, 8))
+
+        body = ttk.Frame(wrap)
+        body.pack(fill="both", expand=True)
+
+        left = ttk.LabelFrame(body, text="Factions",
+                              style="Section.TLabelframe")
+        left.pack(side="left", fill="y", padx=(0, 10))
+        self.listbox = tk.Listbox(left, width=28, height=18,
+                                  exportselection=False, activestyle="none")
+        self.listbox.pack(fill="y", expand=True, padx=6, pady=6)
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+        row = ttk.Frame(left)
+        row.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(row, text="New", width=8,
+                   command=self._new).pack(side="left")
+        ttk.Button(row, text="Duplicate", width=10,
+                   command=self._duplicate).pack(side="left", padx=4)
+        ttk.Button(row, text="Remove", width=8,
+                   command=self._remove).pack(side="left")
+
+        detail = ttk.LabelFrame(body, text="Selected faction",
+                                style="Section.TLabelframe")
+        detail.pack(side="left", fill="both", expand=True)
+
+        namerow = ttk.Frame(detail)
+        namerow.pack(fill="x", padx=8, pady=(8, 2))
+        ttk.Label(namerow, text="Name", width=14, anchor="w").pack(side="left")
+        self.name = ttk.Entry(namerow, width=26)
+        self.name.pack(side="left")
+        self.name.bind("<KeyRelease>", self._commit)
+
+        loadrow = ttk.Frame(detail)
+        loadrow.pack(fill="x", padx=8, pady=2)
+        ttk.Label(loadrow, text="Loadout", width=14, anchor="w").pack(
+            side="left")
+        self.loadout = ttk.Entry(loadrow, width=26)
+        self.loadout.pack(side="left")
+        self.loadout.bind("<KeyRelease>", self._commit)
+        ttk.Label(loadrow, text="blank = default human loadout",
+                  style="Hint.TLabel").pack(side="left", padx=8)
+
+        stancerow = ttk.Frame(detail)
+        stancerow.pack(fill="x", padx=8, pady=2)
+        ttk.Label(stancerow, text="Toward players", width=14,
+                  anchor="w").pack(side="left")
+        self.stance = ttk.Combobox(stancerow, values=FACTION_STANCES, width=12,
+                                   state="readonly")
+        self.stance.pack(side="left")
+        self.stance.bind("<<ComboboxSelected>>", self._commit)
+        self.stance_hint = ttk.Label(detail, text="", wraplength=440,
+                                     style="Hint.TLabel")
+        self.stance_hint.pack(anchor="w", padx=8, pady=(0, 4))
+
+        fbox = ttk.LabelFrame(detail, text="Won't fight these factions",
+                              style="Section.TLabelframe")
+        fbox.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        ttk.Label(fbox,
+                  text="Tick allies. For two custom factions to truly ignore "
+                       "each other, tick it on BOTH. Built-in Expansion "
+                       "factions only befriend you back if their own rules "
+                       "allow it (guards/passive).",
+                  wraplength=440, style="Hint.TLabel").pack(anchor="w", padx=6,
+                                                            pady=(2, 4))
+        self.friendly_holder = ttk.Frame(fbox)
+        self.friendly_holder.pack(fill="both", expand=True, padx=6)
+        self.friendly_vars = {}
+
+        ttk.Button(wrap, text="Save factions",
+                   command=lambda: self.app.save_current()).pack(
+            anchor="w", pady=(4, 0))
+
+        self._inputs = [self.name, self.loadout, self.stance]
+        self.load({"Factions": []})
+
+    # ---- helpers
+
+    def _dirty(self):
+        if self.loading:
+            return
+        self.app.mark_editor_dirty("Factions")
+
+    def _stance_display(self, stored):
+        stored = str(stored or "FRIENDLY").upper()
+        if stored == "GUARD":
+            return "Guard"
+        if stored == "HOSTILE":
+            return "Hostile"
+        return "Friendly"
+
+    def _stance_store(self, display):
+        return str(display or "Friendly").upper()
+
+    def _set_stance_hint(self):
+        text = {
+            "Friendly": "Players can walk up and talk; never attacks unless a "
+                        "dialogue choice turns them hostile.",
+            "Guard": "Tolerates players until one raises a weapon at them, then "
+                     "defends.",
+            "Hostile": "Attacks players on sight.",
+        }
+        self.stance_hint.configure(text=text.get(self.stance.get(), ""))
+
+    def _names(self):
+        return [str(f.get("Name", "") or "") for f in self.factions]
+
+    def _set_entry(self, widget, text):
+        widget.delete(0, tk.END)
+        widget.insert(0, text)
+
+    def _set_detail_state(self, on):
+        state = "normal" if on else "disabled"
+        self.name.configure(state=state)
+        self.loadout.configure(state=state)
+        self.stance.configure(state=("readonly" if on else "disabled"))
+
+    def _refresh_list(self, keep):
+        self.listbox.delete(0, tk.END)
+        for i, faction in enumerate(self.factions):
+            name = str(faction.get("Name", "") or "").strip() or "(faction %d)" \
+                % (i + 1)
+            self.listbox.insert(tk.END, name)
+        if 0 <= keep < len(self.factions):
+            self.listbox.selection_clear(0, tk.END)
+            self.listbox.selection_set(keep)
+            self.selected = keep
+        else:
+            self.selected = -1
+
+    def _build_friendly_checks(self, faction):
+        for child in self.friendly_holder.winfo_children():
+            child.destroy()
+        self.friendly_vars = {}
+        chosen = [str(x) for x in (faction.get("FriendlyFactions") or [])]
+        available = list(PATROL_FACTIONS)
+        for other in self._names():
+            if other and other != faction.get("Name") and other not in available:
+                available.append(other)
+        for name in chosen:
+            if name not in available:
+                available.append(name)
+        columns = 2
+        for index, name in enumerate(available):
+            var = tk.BooleanVar(value=(name in chosen))
+            chk = ttk.Checkbutton(self.friendly_holder, text=name, variable=var,
+                                  command=self._commit)
+            chk.grid(row=index // columns, column=index % columns, sticky="w",
+                     padx=4, pady=1)
+            self.friendly_vars[name] = var
+
+    # ---- events
+
+    def _on_select(self, _event=None):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        self.selected = sel[0]
+        self._populate(self.factions[self.selected])
+
+    def _populate(self, faction):
+        self.loading = True
+        self._set_detail_state(True)
+        self._set_entry(self.name, str(faction.get("Name", "") or ""))
+        self._set_entry(self.loadout, str(faction.get("Loadout", "") or ""))
+        self.stance.set(self._stance_display(faction.get("PlayerStance")))
+        self._set_stance_hint()
+        self._build_friendly_checks(faction)
+        self.loading = False
+
+    def _clear_detail(self):
+        self.loading = True
+        self._set_entry(self.name, "")
+        self._set_entry(self.loadout, "")
+        self.stance.set("Friendly")
+        self.stance_hint.configure(text="")
+        for child in self.friendly_holder.winfo_children():
+            child.destroy()
+        self.friendly_vars = {}
+        self._set_detail_state(False)
+        self.loading = False
+
+    def _commit(self, *_args):
+        if self.loading or self.selected < 0:
+            return
+        faction = self.factions[self.selected]
+        faction["Name"] = self.name.get().strip()
+        faction["Loadout"] = self.loadout.get().strip()
+        faction["PlayerStance"] = self._stance_store(self.stance.get())
+        faction["FriendlyFactions"] = [name for name, var
+                                       in self.friendly_vars.items()
+                                       if var.get()]
+        self._set_stance_hint()
+        name = faction["Name"] or "(faction %d)" % (self.selected + 1)
+        self.listbox.delete(self.selected)
+        self.listbox.insert(self.selected, name)
+        self.listbox.selection_set(self.selected)
+        self._dirty()
+
+    def _new(self):
+        if len(self.factions) >= FACTION_MAX_SLOTS:
+            messagebox.showinfo(
+                APP_TITLE,
+                "You've hit the %d-faction limit built into the mod."
+                % FACTION_MAX_SLOTS)
+            return
+        faction = default_faction()
+        self.factions.append(faction)
+        self._refresh_list(keep=len(self.factions) - 1)
+        self._populate(faction)
+        self._dirty()
+
+    def _duplicate(self):
+        if self.selected < 0:
+            return
+        if len(self.factions) >= FACTION_MAX_SLOTS:
+            messagebox.showinfo(
+                APP_TITLE,
+                "You've hit the %d-faction limit built into the mod."
+                % FACTION_MAX_SLOTS)
+            return
+        clone = copy.deepcopy(self.factions[self.selected])
+        name = str(clone.get("Name", "") or "")
+        clone["Name"] = (name + " (copy)") if name else "(copy)"
+        self.factions.insert(self.selected + 1, clone)
+        self._refresh_list(keep=self.selected + 1)
+        self._populate(clone)
+        self._dirty()
+
+    def _remove(self):
+        if self.selected < 0:
+            return
+        if not messagebox.askyesno(APP_TITLE, "Remove this faction?"):
+            return
+        del self.factions[self.selected]
+        keep = min(self.selected, len(self.factions) - 1)
+        self._refresh_list(keep=keep)
+        if keep >= 0:
+            self._populate(self.factions[keep])
+        else:
+            self._clear_detail()
+        self._dirty()
+
+    # ---- app hooks
+
+    def load(self, data):
+        self.loading = True
+        factions = []
+        if isinstance(data, dict) and isinstance(data.get("Factions"), list):
+            factions = [f for f in data["Factions"] if isinstance(f, dict)]
+        self.factions = factions
+        self._refresh_list(keep=0 if factions else -1)
+        if factions:
+            self._populate(factions[0])
+        else:
+            self._clear_detail()
+        self.loading = False
+
+    def build_output(self):
+        return {"Factions": self.factions}
+
+    def output_path(self):
+        return os.path.join(self.app.profile_path.get() or "",
+                            "Factions", "Factions.json")
+
+    def names(self):
+        return [n for n in self._names() if n]
+
+    def validate(self):
+        issues = []
+        warnings = []
+        seen = {}
+        for i, faction in enumerate(self.factions):
+            name = str(faction.get("Name", "") or "").strip()
+            if not name:
+                issues.append("Faction %d has no name." % (i + 1))
+                continue
+            key = name.lower()
+            if key in seen:
+                issues.append("Two factions are both named '%s' - names must be "
+                              "unique." % name)
+            seen[key] = True
+        if len(self.factions) > FACTION_MAX_SLOTS:
+            issues.append("%d factions defined; only the first %d will load."
+                          % (len(self.factions), FACTION_MAX_SLOTS))
+        return issues, warnings
+
+
 class PreviewScene:
-    """One in-game screen, described plainly enough for the preview window to
-    draw it. `buttons` are (text, kind[, icon]); kind is
-    normal/hover/visited and icon is exit/chat/cart or blank."""
 
     def __init__(self, title, speaker, line, buttons, note=""):
         self.title = title
@@ -4340,9 +6044,6 @@ class PreviewScene:
 
 
 class LivePreviewWindow(tk.Toplevel):
-    """Separate always-available window showing where the text you are typing
-    ends up on the in-game menu. Polls rather than hooking every widget, so
-    nothing has to remember to notify it."""
 
     POLL_MS = 250
 
@@ -4473,8 +6174,6 @@ class LivePreviewWindow(tk.Toplevel):
                 text="(no line - the mod's built-in text shows here)",
                 width=max(60, pw - inner * 2), fill=skin["preview_edge"],
                 font=("Segoe UI", body_size, "italic"))
-        # Measure what the text actually wrapped to rather than guessing, so
-        # the buttons below always start clear of it.
         line_box = canvas.bbox(line_id)
         y = (line_box[3] if line_box else y + body_size) + 14
 
@@ -4500,9 +6199,6 @@ class LivePreviewWindow(tk.Toplevel):
             if show_icons:
                 icon_size = max(8, row_h * 0.5)
                 text_width -= icon_size + 10
-            # Draw the text first so we can measure how tall it wrapped, then
-            # size the highlight box to fit it - a fixed-height box clips long
-            # options into the row below.
             txt_id = canvas.create_text(
                 text_x, y + vpad, anchor="nw", text=text, fill=fill_text,
                 width=max(30, text_width), font=("Segoe UI", body_size))
@@ -4528,11 +6224,6 @@ class LivePreviewWindow(tk.Toplevel):
 # ---------------------------------------------------------------- save as
 
 class SaveAsDialog(tk.Toplevel):
-    """Pick a new destination for the current dialogue tree.
-
-    This is how you take an existing conversation and drop a copy on a
-    different NPC or trader without touching the original file.
-    """
 
     def __init__(self, app, dialogue_tab):
         tk.Toplevel.__init__(self, app)
@@ -4674,14 +6365,11 @@ class App(tk.Tk):
 
         self.profile_path = tk.StringVar(value="")
         self.quest_folder = tk.StringVar(value="")
-        self.quest_index = []   # [{"id": int, "title": str, "file": str}]
+        self.quest_index = []
         self.npc_index = []
-        self.theme_name = "dark"   # matches the mod: gold on near-black
-        # editors with changes that have not been written to disk
+        self.theme_name = "dark"
         self.dirty_editors = set()
         self.preview_window = None
-        # tabs report changes while they build themselves; ignore until the
-        # window is actually up, or it starts life claiming unsaved work
         self.ready = False
         self.load_settings()
 
@@ -4693,8 +6381,6 @@ class App(tk.Tk):
 
         self._build_header()
 
-        # Built BEFORE the tabs: the editors report status while they
-        # construct themselves, so this has to already exist.
         self.status = ttk.Label(self, text="Ready", anchor="w",
                                 relief="sunken", padding=4)
         self.status.pack(fill="x", side="bottom")
@@ -4705,12 +6391,18 @@ class App(tk.Tk):
         self.dialogue_tab = DialogueTab(self.notebook, self)
         self.quest_tab = QuestTextTab(self.notebook, self)
         self.menu_tab = MenuConfigTab(self.notebook, self)
+        self.ai_settings_tab = AISettingsTab(self.notebook, self)
+        self.factions_tab = FactionsTab(self.notebook, self)
+        self.ai_patrols_tab = AIPatrolsTab(self.notebook, self)
         self.files_tab = ttk.Frame(self.notebook)
         self._build_files_tab(self.files_tab)
 
         self.notebook.add(self.dialogue_tab, text="  Dialogue  ")
         self.notebook.add(self.quest_tab, text="  Quest wording  ")
         self.notebook.add(self.menu_tab, text="  Menu appearance  ")
+        self.notebook.add(self.ai_settings_tab, text="  Global AI settings  ")
+        self.notebook.add(self.factions_tab, text="  Factions  ")
+        self.notebook.add(self.ai_patrols_tab, text="  AI patrols  ")
         self.notebook.add(self.files_tab, text="  Server files  ")
 
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
@@ -4742,9 +6434,14 @@ class App(tk.Tk):
 
         words = ttk.Frame(brand)
         words.pack(side="left")
-        self.wordmark = ttk.Label(words, text="DialogueForge",
+        title_row = ttk.Frame(words)
+        title_row.pack(anchor="w")
+        self.wordmark = ttk.Label(title_row, text="DialogueForge",
                                   font=("Segoe UI", 16, "bold"))
-        self.wordmark.pack(anchor="w")
+        self.wordmark.pack(side="left")
+        ttk.Label(title_row, text="v" + APP_VERSION,
+                  style="Hint.TLabel").pack(side="left", anchor="s",
+                                            padx=(6, 0), pady=(0, 3))
         ttk.Label(words,
                   text="config editor for the DayZ Dialogue Framework",
                   style="Hint.TLabel").pack(anchor="w")
@@ -4776,7 +6473,9 @@ class App(tk.Tk):
         folders.pack(side="left", fill="x", expand=True)
         folders.columnconfigure(1, weight=1)
 
-        ttk.Label(folders, text="Server profile folder").grid(
+        ttk.Label(folders,
+                  text="Mod folder in /profiles - eg: "
+                       "DayZServer/Profiles/DialogFramework").grid(
             row=0, column=0, sticky="w")
         ttk.Entry(folders, textvariable=self.profile_path).grid(
             row=0, column=1, sticky="ew", padx=6)
@@ -4817,11 +6516,6 @@ class App(tk.Tk):
             anchor="w", padx=10, pady=(1, 4))
 
     def on_mouse_wheel(self, event):
-        """Send the wheel to whatever is under the pointer.
-
-        Tk delivers wheel events by focus, not position, so without this the
-        wrong panel scrolls. Widgets that scroll themselves keep the event.
-        """
         widget = self.winfo_containing(event.x_root, event.y_root)
         while widget is not None:
             if isinstance(widget, (tk.Listbox, tk.Text)):
@@ -4876,16 +6570,12 @@ class App(tk.Tk):
         return entry["title"] if entry else ""
 
     def npc_speaker_label(self, npc_id):
-        """Format an NPC for context: 'NPC 2 "Steve"', or 'NPC 2' when the
-        name hasn't been scanned in yet."""
         if not isinstance(npc_id, int) or npc_id <= 0:
             return ""
         name = self.npc_name(npc_id)
         return 'NPC %d "%s"' % (npc_id, name) if name else "NPC %d" % npc_id
 
     def npc_givers_label(self, quest_id):
-        """'NPC 2 "Steve"' for the NPC(s) that hand out a quest, comma-joined
-        when several do. Empty when the quest or its givers aren't known."""
         entry = self.quest_lookup(quest_id)
         if not entry:
             return ""
@@ -4893,8 +6583,6 @@ class App(tk.Tk):
         return ", ".join(part for part in parts if part)
 
     def npc_turnins_label(self, quest_id):
-        """'NPC 3 "Bob"' for the NPC(s) a quest is turned in to. Lets a quest
-        with a different giver and turn-in be told apart at a glance."""
         entry = self.quest_lookup(quest_id)
         if not entry:
             return ""
@@ -4903,8 +6591,6 @@ class App(tk.Tk):
         return ", ".join(part for part in parts if part)
 
     def npc_quest_chain(self, npc_id):
-        """Sorted quest IDs an NPC gives OR takes in - the chain the mod walks
-        for that NPC's 'once completed' wording (highest completed one wins)."""
         ids = set()
         for entry in self.quest_index:
             if npc_id in (entry.get("givers") or []) \
@@ -4923,7 +6609,6 @@ class App(tk.Tk):
         return True
 
     def ensure_quest_folder(self):
-        """Returns True once a quest folder is set (asking if it isn't)."""
         if self.quest_folder.get() and os.path.isdir(self.quest_folder.get()):
             if not self.quest_index and not self.npc_index:
                 self.scan_quests(announce=False)
@@ -4938,7 +6623,6 @@ class App(tk.Tk):
         return self.pick_quest_folder()
 
     def guess_quest_folder(self):
-        """Expansion usually sits beside DialogFramework in the profile."""
         if self.quest_folder.get():
             return
         base = self.profile_path.get()
@@ -4956,8 +6640,6 @@ class App(tk.Tk):
 
     @staticmethod
     def quest_scan_roots(root):
-        """Expansion splits quests and NPCs into sibling folders, so picking
-        the Quests folder alone would otherwise find no NPCs at all."""
         if not root or not os.path.isdir(root):
             return []
         roots = [root]
@@ -4974,9 +6656,6 @@ class App(tk.Tk):
         return roots
 
     def scan_quests(self, announce=False):
-        """Index Expansion quest and NPC configs so they can be picked by
-        name. Objective configs share the ID field but carry ObjectiveType,
-        so they're skipped."""
         self.quest_index = []
         self.npc_index = []
         root = self.quest_folder.get()
@@ -5014,8 +6693,6 @@ class App(tk.Tk):
                             if len(lines) > pos and isinstance(lines[pos], str):
                                 return lines[pos].strip()
                             return ""
-                        # Line 1 (offer) and line 3 (turn-in) are the two the
-                        # mod shows verbatim; line 2 is overridden mid-quest.
                         first_desc = desc_at(0)
                         turnin_desc = desc_at(2)
                         givers = [g for g in (data.get("QuestGiverIDs") or [])
@@ -5086,14 +6763,11 @@ class App(tk.Tk):
         style.configure("TLabelframe", bordercolor=colors["border"])
         style.configure("TLabelframe.Label", background=colors["bg"],
                         foreground=colors["fg"])
-        # Screen-box titles: bold and accent-coloured so each in-game screen
-        # reads as its own section and doesn't blend into the field labels.
         style.configure("Section.TLabelframe", background=colors["bg"],
                         bordercolor=colors["border"])
         style.configure("Section.TLabelframe.Label", background=colors["bg"],
                         foreground=colors["accent"],
                         font=("Segoe UI", 10, "bold"))
-        # Collapsible section: a clickable header bar over a hideable body.
         style.configure("Section.TFrame", background=colors["bg"])
         style.configure("SectionBody.TFrame", background=colors["bg"])
         style.configure("SectionHeader.TFrame", background=colors["panel"])
@@ -5137,7 +6811,6 @@ class App(tk.Tk):
                       fieldbackground=[("readonly", colors["field"]),
                                        ("disabled", colors["panel"])],
                       foreground=[("disabled", colors["hint"])])
-        # the combobox popup is a plain tk listbox owned by Tk itself
         self.option_add("*TCombobox*Listbox.background", colors["field"])
         self.option_add("*TCombobox*Listbox.foreground", colors["fg"])
         self.option_add("*TCombobox*Listbox.selectBackground",
@@ -5190,7 +6863,6 @@ class App(tk.Tk):
         self.dialogue_tab.refresh_map()
 
     def skin_children(self, widget):
-        """Classic tk widgets ignore ttk styles, so colour them by hand."""
         colors = self.palette()
         for child in widget.winfo_children():
             if getattr(child, "_skip_theme", False):
@@ -5223,7 +6895,6 @@ class App(tk.Tk):
             self.skin_children(child)
 
     def skin_window(self, window):
-        """Apply the current theme to a pop-up window."""
         window.configure(background=self.palette()["bg"])
         self.skin_children(window)
 
@@ -5299,12 +6970,80 @@ class App(tk.Tk):
     def editor_name(self, editor):
         names = {id(self.dialogue_tab): "Dialogue",
                  id(self.quest_tab): "Quest wording",
-                 id(self.menu_tab): "Menu appearance"}
+                 id(self.menu_tab): "Menu appearance",
+                 id(self.ai_settings_tab): "Global AI settings",
+                 id(self.factions_tab): "Factions",
+                 id(self.ai_patrols_tab): "AI patrols"}
         return names.get(id(editor), "")
 
+    def custom_faction_names(self):
+        tab = getattr(self, "factions_tab", None)
+        if tab is None:
+            return []
+        return tab.names()
+
+    def known_reputations(self):
+        result = {}
+        for key, label in getattr(self, "_rep_scan", {}).items():
+            if key:
+                result[key] = label
+        for name in self.custom_faction_names():
+            key = rep_key_from_name(name)
+            if key:
+                result[key] = name
+        try:
+            own = (self.dialogue_tab.reputation_var.get() or "").strip()
+        except Exception:
+            own = ""
+        own_key = rep_key_from_name(own)
+        if own_key:
+            result.setdefault(own_key, own or rep_label_from_key(own_key))
+        pairs = [(label, key) for key, label in result.items()]
+        pairs.sort(key=lambda pair: pair[0].lower())
+        return pairs
+
+    def _scan_reputations(self):
+        found = {}
+
+        def note(key):
+            key = str(key or "").strip()
+            if key:
+                found.setdefault(key, rep_label_from_key(key))
+
+        for path in getattr(self, "found_files", []):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            note(data.get("ReputationVar"))
+            trees = [data] + list(data.get("Stages") or [])
+            for tree in trees:
+                if not isinstance(tree, dict):
+                    continue
+                note(tree.get("ReputationVar"))
+                for op in (tree.get("RequiredVars") or []):
+                    if isinstance(op, dict):
+                        note(op.get("Name"))
+                for node in (tree.get("Nodes") or []):
+                    if not isinstance(node, dict):
+                        continue
+                    for line in (node.get("SpeakerLines") or []):
+                        for op in (line.get("RequiredVars") or []):
+                            if isinstance(op, dict):
+                                note(op.get("Name"))
+                    for resp in (node.get("Responses") or []):
+                        if not isinstance(resp, dict):
+                            continue
+                        for field in ("SetVars", "RequiredVars"):
+                            for op in (resp.get(field) or []):
+                                if isinstance(op, dict):
+                                    note(op.get("Name"))
+        self._rep_scan = found
+
     def on_close(self):
-        """Never let a closed window be the reason someone loses an hour of
-        writing. Save / Don't save / Cancel, with Cancel as the safe escape."""
         if not self.dirty_editors:
             self.destroy()
             return
@@ -5334,7 +7073,6 @@ class App(tk.Tk):
             self.save_current(quiet=True)
 
         if self.dirty_editors:
-            # a save was cancelled or failed - stay open rather than lose it
             self.set_status("Still unsaved: %s"
                             % ", ".join(sorted(self.dirty_editors)))
             return
@@ -5361,8 +7099,6 @@ class App(tk.Tk):
             "Switch to Dialogue, Quest wording or Menu appearance.")
 
     def set_status(self, text):
-        # Guarded: a status message during start-up should never be able to
-        # take the whole program down.
         status = getattr(self, "status", None)
         if status is not None:
             status.configure(text=text)
@@ -5374,12 +7110,38 @@ class App(tk.Tk):
             title="Select your DialogFramework folder")
         if not folder:
             return
+        folder = self._resolve_profile_folder(folder)
         self.profile_path.set(folder)
         self.save_settings()
         self.dialogue_tab.update_path_preview()
         self.scan_files()
         self.guess_quest_folder()
         self.auto_load_menu_config()
+
+    def _resolve_profile_folder(self, folder):
+        def looks_like_framework(path):
+            return (os.path.isfile(os.path.join(path, "MenuConfig.json"))
+                    or os.path.isdir(os.path.join(path, "Dialogues")))
+
+        if looks_like_framework(folder):
+            return folder
+
+        try:
+            for name in os.listdir(folder):
+                sub = os.path.join(folder, name)
+                if (os.path.isdir(sub) and name.lower() == "dialogframework"
+                        and looks_like_framework(sub)):
+                    if messagebox.askyesno(
+                            APP_TITLE,
+                            "That looks like the profile root.\n\nThe mod's "
+                            "files are in the \"%s\" folder inside it. Use that "
+                            "instead? (recommended)" % name):
+                        return sub
+                    break
+        except Exception:
+            pass
+
+        return folder
 
     def auto_load_menu_config(self):
         path = os.path.join(self.profile_path.get(), "MenuConfig.json")
@@ -5390,6 +7152,32 @@ class App(tk.Tk):
                 self.set_status("Loaded existing MenuConfig.json")
             except Exception as error:
                 self.set_status("MenuConfig.json could not be read: %s" % error)
+
+        ai_path = os.path.join(self.profile_path.get(), "AISettings.json")
+        if os.path.isfile(ai_path):
+            try:
+                with open(ai_path, "r", encoding="utf-8") as handle:
+                    self.ai_settings_tab.load(json.load(handle))
+            except Exception:
+                pass
+
+        faction_path = os.path.join(self.profile_path.get(), "Factions",
+                                    "Factions.json")
+        if os.path.isfile(faction_path):
+            try:
+                with open(faction_path, "r", encoding="utf-8") as handle:
+                    self.factions_tab.load(json.load(handle))
+            except Exception:
+                pass
+
+        patrol_path = os.path.join(self.profile_path.get(), "AIPatrol",
+                                   "AIPatrols.json")
+        if os.path.isfile(patrol_path):
+            try:
+                with open(patrol_path, "r", encoding="utf-8") as handle:
+                    self.ai_patrols_tab.load(json.load(handle))
+            except Exception:
+                pass
 
     def create_structure(self):
         root = self.profile_path.get()
@@ -5412,10 +7200,11 @@ class App(tk.Tk):
             self.file_list.insert(tk.END, "(no profile folder selected)")
             return
         candidates = []
-        menu_config = os.path.join(root, "MenuConfig.json")
-        if os.path.isfile(menu_config):
-            candidates.append(menu_config)
-        for sub in ["Dialogues", "QuestText"]:
+        for top in ["MenuConfig.json", "AISettings.json"]:
+            path = os.path.join(root, top)
+            if os.path.isfile(path):
+                candidates.append(path)
+        for sub in ["Dialogues", "QuestText", "AIPatrol", "Factions"]:
             base = os.path.join(root, sub)
             for current, _dirs, files in os.walk(base):
                 for name in sorted(files):
@@ -5426,6 +7215,7 @@ class App(tk.Tk):
             self.file_list.insert(tk.END, os.path.relpath(path, root))
         if not candidates:
             self.file_list.insert(tk.END, "(no config files found yet)")
+        self._scan_reputations()
 
     def open_loadlog(self):
         path = os.path.join(self.profile_path.get(), "Dialogues",
@@ -5472,7 +7262,22 @@ class App(tk.Tk):
             return
 
         name = os.path.basename(path).lower()
-        if "Quests" in data:
+        if "Factions" in data or name == "factions.json":
+            self.factions_tab.load(data)
+            self.notebook.select(self.factions_tab)
+            self.clear_editor_dirty("Factions")
+            self.set_status("Loaded factions from %s" % path)
+        elif "Patrols" in data or name == "aipatrols.json":
+            self.ai_patrols_tab.load(data)
+            self.notebook.select(self.ai_patrols_tab)
+            self.clear_editor_dirty("AI patrols")
+            self.set_status("Loaded AI patrols from %s" % path)
+        elif "ResetOnDeath" in data or name == "aisettings.json":
+            self.ai_settings_tab.load(data)
+            self.notebook.select(self.ai_settings_tab)
+            self.clear_editor_dirty("Global AI settings")
+            self.set_status("Loaded global AI settings from %s" % path)
+        elif "Quests" in data:
             self.quest_tab.load(data, path)
             self.notebook.select(self.quest_tab)
             self.clear_editor_dirty("Quest wording")
@@ -5491,14 +7296,16 @@ class App(tk.Tk):
             messagebox.showwarning(
                 APP_TITLE,
                 "That doesn't look like a Dialogue Framework config - no "
-                "Nodes, Quests or Position field found.")
+                "Nodes, Quests, Position, Patrols or AI settings field found.")
 
     # ---------------- save & validate
 
     def current_editor(self):
         current = self.notebook.select()
         widget = self.nametowidget(current)
-        if widget in (self.dialogue_tab, self.quest_tab, self.menu_tab):
+        if widget in (self.dialogue_tab, self.quest_tab, self.menu_tab,
+                      self.ai_settings_tab, self.factions_tab,
+                      self.ai_patrols_tab):
             return widget
         return None
 
@@ -5553,6 +7360,12 @@ class App(tk.Tk):
             self.quest_tab: "quest wording file",
             self.menu_tab: "menu appearance (back to defaults)",
         }
+        if editor not in labels:
+            messagebox.showinfo(
+                APP_TITLE,
+                "This tab edits a single server file - open or edit it "
+                "directly rather than starting a blank one.")
+            return
         if not messagebox.askyesno(
                 APP_TITLE,
                 "Start a blank %s?\n\nAnything unsaved in this tab is lost. "
@@ -5611,8 +7424,6 @@ class App(tk.Tk):
             self.save_current()
             return
 
-        # menu config: the mod only ever reads MenuConfig.json, so Save As
-        # here is for keeping a copy of a palette you like
         path = filedialog.asksaveasfilename(
             title="Save a copy of this menu config",
             defaultextension=".json",
@@ -5635,8 +7446,6 @@ class App(tk.Tk):
                 "reference.")
 
     def check_all_files(self):
-        """Validate every config in the profile folder, plus the conflicts
-        that only show up when you look at the files together."""
         root = self.profile_path.get()
         if not root or not os.path.isdir(root):
             messagebox.showinfo(APP_TITLE, "Pick a profile folder first.")
@@ -5648,10 +7457,10 @@ class App(tk.Tk):
                 APP_TITLE, "No config files found under:\n%s" % root)
             return
 
-        results = []            # (relative path, issues, warnings)
-        npc_claims = {}         # npc id  -> [files claiming it]
-        trader_claims = {}      # trader  -> [files]
-        quest_claims = {}       # questid -> [files]
+        results = []
+        npc_claims = {}
+        trader_claims = {}
+        quest_claims = {}
         counts = {"dialogue": 0, "quest": 0, "menu": 0, "unknown": 0}
 
         for path in self.found_files:
@@ -5670,6 +7479,8 @@ class App(tk.Tk):
             if "Nodes" in data:
                 counts["dialogue"] += 1
                 kind, key = kind_and_key_from_path(path)
+                if safe_int(data.get("AIPatrolID", 0), 0) > 0:
+                    kind = "AI"
                 issues, warnings = validate_tree_dict(
                     data, kind, key, self.quest_index)
                 if kind == "NPC":
@@ -5692,10 +7503,33 @@ class App(tk.Tk):
                     warnings.append(
                         "Only MenuConfig.json in the profile root is read by "
                         "the mod - this copy is ignored.")
+            elif "Patrols" in data or name == "aipatrols.json":
+                issues, warnings = [], []
+                plist = data.get("Patrols")
+                if not isinstance(plist, list):
+                    plist = []
+                for i, patrol in enumerate(plist):
+                    if not isinstance(patrol, dict):
+                        continue
+                    pname = (str(patrol.get("Name", "") or "").strip()
+                             or "patrol %d" % (i + 1))
+                    if safe_int(patrol.get("DialogueID", 0), 0) <= 0:
+                        issues.append(
+                            "%s has no Dialogue ID (must be 1 or higher)."
+                            % pname)
+            elif "ResetOnDeath" in data or name == "aisettings.json":
+                issues, warnings = [], []
+            elif "Factions" in data or name == "factions.json":
+                issues, warnings = [], []
+                for i, faction in enumerate(data.get("Factions") or []):
+                    if isinstance(faction, dict) and not str(
+                            faction.get("Name", "") or "").strip():
+                        issues.append("Faction %d has no name." % (i + 1))
             else:
                 counts["unknown"] += 1
                 issues, warnings = [], [
-                    "Not a recognised config - no Nodes, Quests or Position."]
+                    "Not a recognised config - no Nodes, Quests, Position, "
+                    "Patrols, Factions or AI settings."]
             results.append((rel, issues, warnings))
 
         cross_issues = []

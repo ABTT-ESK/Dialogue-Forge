@@ -1,5 +1,75 @@
 # Changelog
 
+## 1.2.0
+
+### Fixed
+- **Save now always overwrites the exact file you opened.** Previously the save
+  path was recomputed from the profile folder and tree type; if that didn't line
+  up with the file's real location, an edit could be written to a different file
+  and the original left unchanged — looking like the edit "reverted" on reopen.
+  Opened files now save back to themselves; only brand-new trees use the
+  computed path. Use "Save as" to deliberately write elsewhere.
+- **Picking the profile root by mistake is now caught.** If you browse to the
+  profile folder instead of the `DialogFramework` folder inside it, Forge spots
+  the `DialogFramework` subfolder and offers to use it — the setup mistake that
+  made saves land in the wrong place.
+- **The AI configs now show up everywhere.** `AISettings.json`, `AIPatrols.json`
+  and `Factions.json` are recognised by Open file, listed in the Server files
+  tab, and included in "Check ALL config files" — previously they were invisible
+  to those.
+
+### Editing
+- **Reputations are now pick-from-a-list, not typed.** You give a character a
+  name and it gets its own reputation automatically — no codes to remember. Every
+  "change reputation" or "only show if reputation…" row is a **dropdown** of your
+  characters and factions instead of a text box, so a typo can't silently break
+  the link. The list fills itself from the NPCs and factions in your profile, and
+  power users can still type a custom one-off flag.
+- **Factions tab.** Create your own AI factions — name, loadout, stance toward
+  players (friendly / guard / hostile), and a won't-fight list of other factions.
+  Up to 32. Custom faction names then appear in the AI patrols tab's Faction
+  dropdown.
+- **AI patrols tab — full patrol generator.** Build talkable patrols from
+  scratch. New / Duplicate / Remove, every Expansion patrol setting (identity,
+  spawning, movement & formation, spawn area, advanced combat tuning), plus this
+  mod's dialogue ID and permanent-hostility override. Faction / formation / behaviour / speed / stance are dropdowns
+  filled from Expansion's own script values. A waypoint editor lets you add,
+  update, remove or bulk-paste route coordinates. Opening an existing patrols
+  file keeps any field the editor doesn't show untouched.
+- **Global AI settings tab** (formerly "AI settings"). The server-wide AI
+  calm-down rules — the triggers (death / weapon away / hands up / leave area),
+  the leave-area distance, and how long a grudge is held — with dropdowns and
+  checkboxes, no hand-editing. Patrols can override these on the AI patrols tab.
+- **Anti-farm limit on options.** Each response has a "Max times a player can
+  pick this (0 = unlimited)" field. Set it and the option disappears after that
+  many picks per player — stops reputation-farming by spamming the same choice.
+  Forge manages the hidden counter for you.
+- **Reputation & story flags.** Every response has a plain-English Variables
+  section: "When this option is picked" rows read *Increase by / Decrease by /
+  Set to* N points of a reputation, and "Only show this option if" rows read *is
+  at least / is more than / is at most / is below / is exactly / is not* N — all
+  dropdowns, no codes to learn. The same conditions work on greeting lines and on
+  quest-locked conversations.
+- **Per-character reputation.** The *Who it's for* tab has a "This character's
+  reputation" section: name the character and add display tiers (e.g. *at 3 or
+  more, show "Friendly"*) that appear in the in-game window. A response gets
+  **"+ change / require this character's reputation"** buttons that fill this
+  character in for you.
+- **Talkable-AI dialogue.** New **"Talkable AI (Expansion)"** target type on the
+  Dialogue tab, with the patrol ID / unit-number fields. New response actions
+  (AI conversations only): one recruits the AI into the player's group, another
+  turns the AI's whole patrol hostile. The checker flags an AI conversation with
+  no patrol ID. On an AI conversation the **Quest talk** page is greyed out and
+  the quest-only response actions are hidden — AI never open a quest list.
+- **Quest-locked conversations.** On the Dialogue tab, an "Editing conversation"
+  dropdown lets you build as many separate conversations per NPC as you like —
+  the first is the base (always shown), and each further one opens once its quest
+  is completed. Each has its own outline, branch map and starting point, so a
+  stage of the story is a clean workspace instead of one sprawling set of screens.
+  Set the unlock quest inline, add/remove conversations, and right-click a screen
+  to **copy it (or its whole branch) into another conversation** with numbering
+  handled for you. NPCs that use only the base conversation are unaffected.
+
 ## 1.1.1
 
 ### A calmer, less crowded layout

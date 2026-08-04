@@ -42,6 +42,14 @@ picks one at random.
 position. "Keys that must agree" is how many of those need to match. If you
 only fill in the trader name, set it to 1.
 
+**This character's reputation** — give the character a **name** (e.g. *Silent
+Guard*) and it gets its own reputation to track. You never type a code: Forge
+turns the name into the key for you (shown as *saved as: rep_silent_guard*), and
+that name then appears in the reputation dropdowns on every other NPC, so anyone
+can raise or lower it without knowing the key. Add **tiers** to show a word
+(*Hostile / Friendly / Trusted*) next to the name in-game instead of a raw
+number. Leave the name blank for no reputation.
+
 ### Quest talk
 
 What this NPC says around their quest list, for this NPC as a whole.
@@ -103,6 +111,16 @@ quest. Use **Browse quests...** to pick by name.
 
 Renaming a node ID automatically repoints everything that led to it, so you
 can renumber without breaking anything.
+
+**Reputation & story flags** (on each button, under the optional section) —
+change or check a reputation when a button is picked. The **Reputation**
+dropdown lists every character you've named and every faction you've made, so
+you just pick one and choose *Increase by / Decrease by / Set to* (or, to gate a
+button, *is at least / is below / …*). Because it's one shared list, what a
+player says to one NPC can move another NPC's — or a whole faction's —
+reputation. You can still type a custom flag name if you want a one-off. The
+**+ change / require this character's reputation** buttons fill in this
+character for you.
 
 ---
 
@@ -196,6 +214,79 @@ theme you set. Off by default.
 Turn it on and both previews show the icons, picked from what each option
 actually does — so on the Dialogue tab you can see at a glance whether an
 option reads as "this ends the chat" before a player ever clicks it.
+
+## Global AI settings
+
+The server-wide defaults for what a talkable AI does after a `GO_HOSTILE`
+dialogue choice turns it on the player. Saves to `AISettings.json`. Only affects
+AI angered through dialogue — ordinary AI combat is untouched. Individual patrols
+can override the permanent-hostility parts on the AI patrols tab.
+
+**Let them calm down when the player…** — tick which of dies / puts their weapon
+away / puts their hands up / leaves the area make an angered AI stand down.
+**Leave-area distance** and **Check every** tune the last one and how often the
+mod re-checks.
+
+**Permanent hostility** — after angering an AI this many times, that player is
+hostile for good. `0` = never permanent. **Remembered by** decides whether the
+grudge is held by the whole faction, just that patrol, or both.
+
+## Factions
+
+Make your own AI factions in `Factions\Factions.json` and hand them to talkable
+patrols — a way past Expansion's small set of built-in factions. **New /
+Duplicate / Remove**, up to 32 factions (a limit baked into the mod). Each has:
+
+- **Name** — what you'll pick on the AI patrols tab, and the name other factions
+  reference as friend or foe.
+- **Loadout** — a loadout file name; blank uses the default human loadout.
+- **Toward players** — *Friendly* (walk up and talk, never attacks unless a
+  dialogue choice turns them hostile), *Guard* (tolerates you until you raise a
+  weapon at them), or *Hostile* (attacks on sight).
+- **Won't fight these factions** — tick allies (built-in or your own). For two
+  *custom* factions to truly ignore each other, tick it on **both**. Befriending
+  a built-in Expansion faction only works if the built-in's own rules allow it
+  (guards and passive factions), which is an Expansion limitation, not ours.
+
+Behind the scenes the mod maps each faction onto a pre-registered slot, so this
+all works without touching Expansion's own files.
+
+## AI patrols
+
+A full generator for the talkable patrols in `AIPatrol\AIPatrols.json`. Each
+entry is a normal Expansion patrol plus the two links this mod adds. Dropdowns
+(faction, formation, behaviour, speed, stance) are filled from Expansion's own
+script values, so you can't fat-finger a bad one.
+
+**New patrol** makes one from scratch with sensible defaults; **Duplicate**
+copies the selected one (handy for a second unit or a nearby route); **Remove**
+deletes it.
+
+The detail panel is grouped:
+
+- **Identity & dialogue link** — the patrol's name and its **Dialogue ID**
+  (match a dialogue tree's `AIPatrolID`).
+- **Spawning** — faction, loadout, unit count and max, spawn chance, persist,
+  respawn/despawn, looting, contaminated-area and AI-trigger toggles. The
+  **Faction** dropdown lists Expansion's built-ins plus any factions you made on
+  the Factions tab. **Units** is an optional comma-separated list of AI
+  classnames; blank uses the faction default.
+- **Movement & formation** — behaviour, walk/threat speed, formation and its
+  scale/looseness, default stance and look angle, unlimited reload.
+- **Spawn area** — the distance/spread/despawn radii and the random-start-point
+  toggle. `-1` means "use Expansion's default".
+- **Waypoints** — where the patrol lives. **At least one is required** — with
+  none the patrol does not spawn at all. One waypoint = it spawns there and holds
+  position; extra waypoints = a route it walks (the first is the spawn point).
+  Type X/Y/Z and **Add**, or **Paste coords…** to drop in a whole route (any
+  lines with three numbers); select a row to **Update** or **Remove** it.
+- **Advanced combat** *(the remaining fields)* — accuracy, damage multipliers,
+  threat/noise distances, flanking, headshot resistance and the rest. Left at
+  their defaults (`-1` / `0`) they behave exactly like a stock Expansion patrol.
+- **Permanent hostility for this patrol** — overrides the Global AI settings tab
+  for this patrol only. *Use server default* leaves it alone; *Never permanent*
+  always forgives; *After a set number* makes it permanent after that many bad
+  runs. **Remembered by** overrides the faction/patrol/both choice the same way.
 
 ## Server files
 
