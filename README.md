@@ -51,6 +51,14 @@ over the same NPC.
 Point it at your Expansion quests folder once and every quest field becomes a
 dropdown of real names. No more digging through files for an ID number.
 
+**Translates your dialogue**
+
+Pick a language, work down a list of every line in the conversation, type the
+translation next to the original. Your conversation files aren't touched —
+translations save alongside them, and anything you leave blank shows your own
+wording in game, so you can ship a language before it's finished. The editor's
+own interface switches language too.
+
 ---
 
 ## Live preview
@@ -128,6 +136,13 @@ fill in what you care about.
 
 <img src="docs/images/DF4.png" alt="The quest wording tab">
 
+### Translations
+
+Every line in the conversation you have open, listed with a box to type the
+translation into. A counter for how many are done, a filter for what's left,
+and a jump to the next gap. Saves to `Localization\<language>\` beside your
+configs; your conversation files are never rewritten.
+
 ### Menu appearance
 
 Colour pickers for every part of the window, sliders for size and position,
@@ -143,6 +158,15 @@ Dead node references, unreachable branches, duplicate IDs, and wording that
 can never appear because nothing in the tree opens that screen.
 
 <img src="docs/images/DF8.png" alt="The check-all-files report showing 30 files checked with nothing to report">
+
+### Quest flow report
+
+One button writes `QuestFlow.txt` into your profile folder — every quest your
+conversations mention, listed both by quest and by conversation, with the
+option's own wording beside it. Look up *"what shows after quest 102?"* instead
+of remembering it. It also names the mistakes you can't see in game: an option
+that shows and hides on the same quest, an offer-quest option with no quest
+picked, or a quest ID that isn't in your quest folder.
 
 ### Your whole setup, listed
 

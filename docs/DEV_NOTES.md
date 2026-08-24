@@ -5,9 +5,9 @@ of this — see [`GUIDE.md`](GUIDE.md).
 
 The app is a single file, `src/DialogueForge.py`, laid out top to bottom:
 constants → theme/artwork → helpers → spellcheck → shared widgets →
-validation → the tabs (Dialogue, Quest wording, Menu appearance, Global AI
-settings, Factions, AI patrols) → live preview → main app. `# ----` banners mark
-each section.
+validation → the tabs (Dialogue, Quest wording, Translations, Menu appearance,
+Global AI settings, Factions, AI patrols, Server files) → live preview → main
+app. `# ----` banners mark each section.
 
 Every tab implements the same contract the main app calls: `load(data)`,
 `build_output()`, `output_path()`, and `validate()` (returns `(issues,
@@ -63,6 +63,73 @@ lines so writing line 3 never leaves gaps.
 Expansion splits quests and NPCs into sibling folders, so the scan starts from
 the parent, not the Quests folder alone. Objective configs share the `ID`
 field but carry `ObjectiveType`, so they're skipped when indexing quests.
+
+## Translations tab
+
+Two unrelated things share the word "language" here, and keeping them apart
+matters:
+
+- **The dialogue's language** — what `TranslationsTab` edits. It never touches
+  the tree file; it writes an overlay of `{Key, Text}` records to
+  `Localization\<language>\`.
+- **The editor's own language** — `tr()`, `UI_TRANSLATIONS` and
+  `App.translate_children`.
+
+**The keys are a contract with the mod.** `loc_tree_entries` /
+`loc_quest_entries` build exactly what `DialogueLocKeys` builds in
+`3_Game/Dialogue/DialogueLocalization.c`. Both sides must change together — a
+mismatch throws no error, the text just silently stays in the source language.
+Indexes count entries **as serialised**, which is why the collectors run over
+`build_output()` rather than the live edit state.
+
+Translations are cached per language in `by_language` keyed by
+`t|<key>` / `q<id>|<key>`, never by row position. That is what lets the tab
+re-read the tree whenever it's opened (`App.on_tab_changed`) without losing a
+half-finished pass — and it's why reordering responses in the Dialogue tab
+re-points the translations correctly on the next visit.
+
+`loc_relative_tree_path` returns `""` for a tree that isn't saved into the
+profile yet: its computed path still contains the `?` placeholder, which is not
+a legal filename and would produce a `TreeFile` the server could never match.
+Empty means "match by tree ID only", which validation warns about.
+
+## The editor's own language
+
+Rather than wrapping ~600 literals in `tr()`, `App.translate_children` walks
+the widget tree and swaps any `text` option it has a translation for, keyed by
+the English string itself. The original is stashed on `_source_text` on first
+pass so switching language twice still translates from English rather than from
+its own output. `skin_window` runs it for new toplevels.
+
+Consequences worth knowing:
+
+- Only **static** captions are covered. Text built at runtime (status lines,
+  `messagebox` bodies, anything with `%` formatting) stays English unless the
+  call site is wrapped in `tr()`.
+- `tr()` records every string it is asked about, which is what
+  `export_ui_template` writes out — so the template only contains strings from
+  tabs the user actually visited this session.
+- Translations live in `UI_TRANSLATIONS` (the chrome, all 13 languages) merged
+  with an optional `DialogueForge_locales.json` next to the exe. The external
+  file wins, needs no rebuild, and is how a community translation ships.
+
+## Quest flow report
+
+`write_quest_flow` (Server files tab) walks every tree in the profile and
+writes `QuestFlow.txt` — every quest the conversations mention, listed by
+quest and by conversation.
+
+It is deliberately split three ways so nothing has to run twice:
+`quest_flow_rows` collects, `quest_flow_problems` judges, and
+`build_quest_flow_report` formats. **`quest_flow_problems` is also called from
+`check_all_files`**, so the report and the sweep can never disagree about what
+counts as a mistake — add a rule there, not in the report builder.
+
+It catches what is invisible in game: a response whose `RequiredQuestID` and
+`HideAfterQuestID` are the same quest (it can never appear), an `OFFER_QUEST`
+with no `QuestID`, and any quest id with no matching config. The mod's
+`DialogueManager` runs the equivalent checks into `LoadLog.txt`, so a server
+owner who never opens the editor still gets told.
 
 ## Tk gotchas
 

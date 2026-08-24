@@ -1,5 +1,93 @@
 # Changelog
 
+## 1.3.0
+
+### Added
+- **Translations tab.** Pick a language, work down a list of every line in the
+  dialogue tree (or quest wording file) you have open, and type the translation
+  next to the original. Shows how many are done, has an "only show what's still
+  missing" filter and a "next one missing" jump, and saves to
+  `Localization\<language>\` in your profile folder — your tree files are never
+  touched. Anything left blank shows the original wording in game, so you can
+  ship a language before it's finished.
+  - Translations are held per language while you work, so flicking between
+    German and Russian never loses a half-finished pass.
+  - "Load what's on disk" pulls back a translation you saved earlier, and
+    opening a `Localization\...` file from the Server files tab lands in the
+    right language automatically.
+  - Keys are generated and kept in step with the tree for you. Reordering
+    responses in the Dialogue tab and coming back re-reads the tree, so the
+    lines always line up with what the server will ask for.
+- **The editor's own interface can be switched to another language** with the
+  dropdown next to the dark-mode button; the choice is remembered. Tabs, the
+  toolbar and the Translations tab are translated into all 13 languages out of
+  the box, and everything else stays English until a translation exists for it.
+- **"Export interface template..."** (on the Translations tab) writes
+  `DialogueForge_locales.json` next to DialogueForge.exe with every interface
+  string it has shown so far. Fill in the blanks for a language, restart, and
+  it's picked up — no rebuild, no Python needed. Visit every tab before
+  exporting so nothing is missed.
+- **Quest flow report** on the Server files tab. Writes `QuestFlow.txt` into
+  your profile folder: every quest your conversations mention, listed by
+  quest and by conversation, with the option's own wording next to it. Built
+  so you can look up "what shows after 102?" instead of remembering it.
+  It also names the mistakes you can't see in game -- an option that shows
+  and hides on the same quest, an `OFFER_QUEST` with no quest picked, or a
+  quest id that isn't in your quest folder. The same checks now run in
+  "Check ALL config files".
+- **Two new fields on a response**, both quest pickers with a Browse button:
+  - **Hide after** -- the option disappears once that quest is completed.
+  - **Quest to use** -- which quest `OFFER_QUEST` or `ACCEPT_QUEST`
+    acts on. Greys out for actions that don't use one.
+- **`OFFER_QUEST`** in the action dropdown, no longer behind "show advanced":
+  it opens one quest's offer screen from any option you write.
+- **"Check ALL config files" now checks translations too.** A translation
+  points at a line by position, so editing a conversation after translating it
+  can leave the translation aimed at the wrong line — nothing errors in game,
+  the text just quietly comes out wrong. The sweep reports:
+  - lines pointing at text that no longer exists (edit the tree, re-save the
+    translation),
+  - translations that match no tree at all, or match only by ID because the
+    file was renamed,
+  - a language folder that isn't one the mod reads,
+  - and how many lines of each conversation are done, so you can see at a
+    glance what's left across your whole server.
+- **"Let players pick their language"** on the Menu appearance tab, next to the
+  hint-icons toggle. On by default, and it only does anything on a server that
+  has translations installed.
+- **"Tell players on screen when an option is misconfigured"** on Menu
+  appearance. On by default. Controls the mod's new pop-up for a badly set up
+  option; the "you can't take that quest yet" message always shows either way.
+- **"Option text scales with panel size"**, also on Menu appearance. Off by
+  default to match the mod, so ticking it is a deliberate choice.
+
+- **Screen names now match the mod's.** The quest wording tab headings and the
+  live preview titles use the eleven agreed names from the mod's
+  `docs/SCREENS.md` -- "Quest turn-in screen" rather than one tab saying
+  "Turn-in screen" and the preview saying "Ready to hand in". The no-quests
+  screen alone had four different names between them.
+
+### Fixed
+- **The live preview no longer says a long option fits when it doesn't.** It
+  wrapped and grew option boxes without limit, while the game clipped the text
+  to a single line — which is how a truncated response could look perfectly
+  fine here and be cut in half in game. The preview now models what the mod
+  actually does: wrap and grow to three lines, then shrink the text.
+
+### Changed
+- The **Server files** list and **Create folder structure** now include the
+  `Localization` folder.
+- Menu appearance now writes `ConfigVersion` 6, and never lowers the version a
+  file arrived with.
+
+## 1.2.1
+
+### Fixed
+- **Copy/paste now works on non-English keyboard layouts.** Ctrl+C, Ctrl+V,
+  Ctrl+X and Ctrl+A work in the text boxes regardless of layout — previously they
+  did nothing on layouts where the key isn't a Latin letter (e.g. Cyrillic).
+  Right-click still has Copy/Paste as well.
+
 ## 1.2.0
 
 ### Fixed

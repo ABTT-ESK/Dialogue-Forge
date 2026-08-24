@@ -12,7 +12,7 @@ try:
 except Exception:
     SpellChecker = None
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 APP_TITLE = "DialogueForge - DayZ Dialogue Framework config editor"
 SETTINGS_FILE = os.path.join(
     os.path.expanduser("~"), ".dialogueforge_settings.json")
@@ -22,6 +22,7 @@ SETTINGS_FILE = os.path.join(
 ACTION_TYPES = [
     "NONE",
     "SHOW_QUEST_LIST",
+    "OFFER_QUEST",
     "END_CONVERSATION",
     "OPEN_TRADER",
     "RECRUIT_AI",
@@ -37,11 +38,12 @@ ADVANCED_ACTION_TYPES = [
 ACTION_HELP = {
     "NONE": "Go to the node picked in 'Next node'. Set it to (end) to finish.",
     "SHOW_QUEST_LIST": "Opens the live quest list for this NPC.",
+    "OFFER_QUEST": "Opens one specific quest's offer screen - its description, what it needs, what it pays, and accept/decline buttons. Pick the quest in 'Quest to use'.",
     "END_CONVERSATION": "Plays a random farewell line, then closes the window.",
     "OPEN_TRADER": "Traders only. Closes dialogue and opens the market menu.",
     "RECRUIT_AI": "AI trees only. Recruits the AI into the player's group, then closes. Respects Expansion's recruit settings; add a RequiredQuestID to lock it behind a quest.",
     "GO_HOSTILE": "AI trees only. The AI's whole patrol turns hostile and attacks the player, then the window closes. For conversations that can go sideways.",
-    "ACCEPT_QUEST": "Advanced - only meaningful inside the live quest-detail step.",
+    "ACCEPT_QUEST": "Hands the player a quest immediately, with no offer screen. Pick it in 'Quest to use'. Left empty, it only works inside the live quest-detail step.",
     "DECLINE_QUEST": "Advanced - only meaningful inside the live quest-detail step.",
     "TURN_IN_QUEST": "Advanced - only meaningful inside the live quest-detail step.",
 }
@@ -49,6 +51,10 @@ ACTION_HELP = {
 NODE_TYPES = ["STANDARD", "QUEST_LIST", "QUEST_DETAIL"]
 
 NOT_LOCKED_LABEL = "Not locked"
+
+NEVER_HIDDEN_LABEL = "Never hidden"
+
+NO_ACTION_QUEST_LABEL = "(none)"
 
 OVERRIDE_NONE_LABEL = "No override"
 
@@ -70,6 +76,62 @@ POSITIONS = [
     "TOP_LEFT", "TOP_CENTER", "TOP_RIGHT",
     "CENTER_LEFT", "CENTER", "CENTER_RIGHT",
     "BOTTOM_LEFT", "BOTTOM_CENTER", "BOTTOM_RIGHT",
+]
+
+# ---------------------------------------------------------------- languages
+
+#! Must stay in step with DialogueFWLanguages.All() in the mod and with the
+#! column order of the mod's stringtable.csv -- the folder name under
+#! Localization\ is what the server matches on.
+TRANSLATION_LANGUAGES = [
+    ("english", "English"),
+    ("czech", "Čeština"),
+    ("german", "Deutsch"),
+    ("russian", "Русский"),
+    ("polish", "Polski"),
+    ("hungarian", "Magyar"),
+    ("italian", "Italiano"),
+    ("spanish", "Español"),
+    ("french", "Français"),
+    ("chinese", "繁體中文"),
+    ("japanese", "日本語"),
+    ("portuguese", "Português"),
+    ("chinesesimp", "简体中文"),
+]
+
+LANGUAGE_CODES = [code for code, _label in TRANSLATION_LANGUAGES]
+
+LANGUAGE_LABELS = dict(TRANSLATION_LANGUAGES)
+
+LOC_FILE_VERSION = 1
+
+#! Tree-level lists the player can see. Field name -> what it is, in the
+#! wording the Translations tab shows above each group.
+TREE_TEXT_LISTS = [
+    ("QuestListTexts", "Line above the quest list"),
+    ("NoQuestsTexts", "Line when there is nothing available"),
+    ("NoQuestsBackTexts", "Back button, nothing-available screen"),
+    ("NoQuestsLeaveTexts", "Leave button, nothing-available screen"),
+    ("QuestListBackTexts", "Back button, quest list"),
+    ("OfferBackTexts", "Back button, quest offer"),
+    ("InProgressBackTexts", "Back button, quest in progress"),
+    ("TurnInBackTexts", "Back button, quest turn-in"),
+]
+
+QUEST_TEXT_LISTS = [
+    ("AcceptTexts", "Accept button"),
+    ("DeclineTexts", "Decline button"),
+    ("TurnInTexts", "Turn-in button"),
+    ("NotYetTexts", "Not-yet button"),
+    ("InProgressTexts", "Still-working-on-it button"),
+    ("QuestListTexts", "Line above the quest list"),
+    ("NoQuestsTexts", "Line when there is nothing available"),
+    ("NoQuestsBackTexts", "Back button, nothing-available screen"),
+    ("NoQuestsLeaveTexts", "Leave button, nothing-available screen"),
+    ("QuestListBackTexts", "Back button, quest list"),
+    ("OfferBackTexts", "Back button, quest offer"),
+    ("InProgressBackTexts", "Back button, quest in progress"),
+    ("TurnInBackTexts", "Back button, quest turn-in"),
 ]
 
 COLOR_FIELDS = [
@@ -274,6 +336,9 @@ def default_menu_config():
     cfg["VisitedResponseOpacity"] = 0.4
     cfg["FontStyle"] = "DEFAULT"
     cfg["ShowResponseIcons"] = False
+    cfg["ShowLanguageButton"] = True
+    cfg["ScaleTextWithPanel"] = False
+    cfg["ShowErrorNotifications"] = True
     cfg["LayoutOverride"] = ""
     return cfg
 
@@ -427,6 +492,709 @@ def clean_var_ops(raw):
     return ops
 
 
+
+
+# ------------------------------------------------- translation key builders
+
+#! These key strings are a contract with the mod: DialogueLocKeys in
+#! Scripts/3_Game/Dialogue/DialogueLocalization.c builds the exact same
+#! strings at runtime. Change one side and translations silently stop
+#! matching, so change both together.
+
+def _stage_prefix(stage_index):
+    if stage_index is None or stage_index < 0:
+        return ""
+    return "stage.%d." % stage_index
+
+
+def loc_node_entries(nodes, stage_index, where_prefix):
+    """(key, original, where) for every visible string in a list of nodes."""
+    entries = []
+    prefix = _stage_prefix(stage_index)
+    for node in nodes or []:
+        node_id = safe_int(node.get("ID", 1), 1)
+        where = "%sNode %d" % (where_prefix, node_id)
+
+        speaker = node.get("SpeakerText", "") or ""
+        if speaker.strip():
+            entries.append((prefix + "node.%d.SpeakerText" % node_id,
+                            speaker, where + "  -  spoken line"))
+
+        for index, line in enumerate(node.get("SpeakerLines") or []):
+            text = line.get("Text", "") or ""
+            if text.strip():
+                entries.append(
+                    (prefix + "node.%d.SpeakerLines.%d" % (node_id, index),
+                     text, where + "  -  alternate line %d" % (index + 1)))
+
+        for index, response in enumerate(node.get("Responses") or []):
+            text = response.get("Text", "") or ""
+            if text.strip():
+                entries.append(
+                    (prefix + "node.%d.Responses.%d" % (node_id, index),
+                     text, where + "  -  option %d" % (index + 1)))
+
+    return entries
+
+
+def loc_tree_entries(data):
+    """Every player-visible string in a dialogue tree, in reading order."""
+    entries = []
+
+    for field, label in TREE_TEXT_LISTS:
+        for index, text in enumerate(data.get(field) or []):
+            if str(text).strip():
+                entries.append(("tree.%s.%d" % (field, index), str(text),
+                                "%s %d" % (label, index + 1)))
+
+    for index, tier in enumerate(data.get("ReputationTiers") or []):
+        label = str(tier.get("Label", ""))
+        if label.strip():
+            entries.append(("tree.ReputationTiers.%d" % index, label,
+                            "Reputation tier %d" % (index + 1)))
+
+    entries.extend(loc_node_entries(data.get("Nodes"), -1, ""))
+
+    for stage_index, stage in enumerate(data.get("Stages") or []):
+        entries.extend(loc_node_entries(
+            stage.get("Nodes"), stage_index,
+            "Story tree %d  -  " % (stage_index + 1)))
+
+    return entries
+
+
+def loc_quest_entries(quest):
+    """Every player-visible string in one QuestText entry."""
+    entries = []
+
+    for field, label in QUEST_TEXT_LISTS:
+        for index, text in enumerate(quest.get(field) or []):
+            if str(text).strip():
+                entries.append(("quest.%s.%d" % (field, index), str(text),
+                                "%s %d" % (label, index + 1)))
+
+    reward = str(quest.get("RewardSelectText", "") or "")
+    if reward.strip():
+        entries.append(("quest.RewardSelectText", reward,
+                        "Line above the reward choice"))
+
+    return entries
+
+
+def loc_relative_tree_path(profile_root, tree_path):
+    """The TreeFile value the mod matches on: the tree's path under
+    Dialogues\\, lowercased, forward slashes."""
+    if not profile_root or not tree_path:
+        return ""
+    base = os.path.join(profile_root, "Dialogues")
+    try:
+        relative = os.path.relpath(tree_path, base)
+    except ValueError:
+        return ""
+    if relative.startswith(".."):
+        return ""
+    #! An unsaved tree's path still has the "?" placeholder in it. That is not
+    #! a real file, so report it as unmatchable rather than writing a TreeFile
+    #! the server could never line up with anything.
+    if re.search(r'[<>:"|?*]', relative):
+        return ""
+    return relative.replace("\\", "/").lower()
+
+
+# ------------------------------------------------------- editor's own language
+
+#! The editor's interface is translated by walking the widget tree and
+#! swapping any text we have a translation for, keyed by the English string
+#! itself. Nothing in the layout code has to know about languages, and an
+#! untranslated string simply stays English.
+
+#! Keyed by the English string exactly as it appears in the layout code.
+#! This covers the chrome -- tabs, toolbar, folder pickers. Everything else
+#! falls back to English until someone fills in the template written by
+#! "Export interface template..." on the Translations tab.
+UI_TRANSLATIONS = {
+    "czech": {
+        "  Dialogue  ": "  Dialog  ",
+        "  Quest wording  ": "  Text úkolů  ",
+        "  Translations  ": "  Překlady  ",
+        "  Menu appearance  ": "  Vzhled okna  ",
+        "  Global AI settings  ": "  Globální AI  ",
+        "  Factions  ": "  Frakce  ",
+        "  AI patrols  ": "  AI hlídky  ",
+        "  Server files  ": "  Soubory serveru  ",
+        "New (blank)": "Nový (prázdný)",
+        "Open file...": "Otevřít soubor...",
+        "Save": "Uložit",
+        "Save as / copy to...": "Uložit jako / kopírovat...",
+        "Check this tab": "Zkontrolovat záložku",
+        "Check ALL config files": "Zkontrolovat VŠE",
+        "Browse...": "Procházet...",
+        "Live preview": "Živý náhled",
+        "Dark mode": "Tmavý režim",
+        "Light mode": "Světlý režim",
+        "Ready": "Připraveno",
+        "Translate into": "Přeložit do",
+        "Load what's on disk": "Načíst z disku",
+        "Pull latest text": "Načíst aktuální text",
+        "Original": "Originál",
+        "Translation": "Překlad",
+        "Apply": "Použít",
+        "Copy the original across": "Zkopírovat originál",
+        "Next one missing": "Další chybějící",
+        "Only show lines still missing": "Zobrazit jen chybějící",
+        "Export interface template...": "Exportovat šablonu rozhraní...",
+    },
+    "german": {
+        "  Dialogue  ": "  Dialog  ",
+        "  Quest wording  ": "  Quest-Texte  ",
+        "  Translations  ": "  Übersetzungen  ",
+        "  Menu appearance  ": "  Fenster-Design  ",
+        "  Global AI settings  ": "  Globale KI  ",
+        "  Factions  ": "  Fraktionen  ",
+        "  AI patrols  ": "  KI-Patrouillen  ",
+        "  Server files  ": "  Server-Dateien  ",
+        "New (blank)": "Neu (leer)",
+        "Open file...": "Datei öffnen...",
+        "Save": "Speichern",
+        "Save as / copy to...": "Speichern unter / kopieren...",
+        "Check this tab": "Diesen Tab prüfen",
+        "Check ALL config files": "ALLE Dateien prüfen",
+        "Browse...": "Durchsuchen...",
+        "Live preview": "Live-Vorschau",
+        "Dark mode": "Dunkler Modus",
+        "Light mode": "Heller Modus",
+        "Ready": "Bereit",
+        "Translate into": "Übersetzen nach",
+        "Load what's on disk": "Von der Festplatte laden",
+        "Pull latest text": "Aktuellen Text holen",
+        "Original": "Original",
+        "Translation": "Übersetzung",
+        "Apply": "Übernehmen",
+        "Copy the original across": "Original übernehmen",
+        "Next one missing": "Nächste fehlende",
+        "Only show lines still missing": "Nur fehlende anzeigen",
+        "Export interface template...": "Oberflächen-Vorlage exportieren...",
+    },
+    "russian": {
+        "  Dialogue  ": "  Диалог  ",
+        "  Quest wording  ": "  Тексты заданий  ",
+        "  Translations  ": "  Переводы  ",
+        "  Menu appearance  ": "  Вид окна  ",
+        "  Global AI settings  ": "  Общие настройки ИИ  ",
+        "  Factions  ": "  Фракции  ",
+        "  AI patrols  ": "  Патрули ИИ  ",
+        "  Server files  ": "  Файлы сервера  ",
+        "New (blank)": "Создать (пустой)",
+        "Open file...": "Открыть файл...",
+        "Save": "Сохранить",
+        "Save as / copy to...": "Сохранить как / копировать...",
+        "Check this tab": "Проверить вкладку",
+        "Check ALL config files": "Проверить ВСЁ",
+        "Browse...": "Обзор...",
+        "Live preview": "Живой просмотр",
+        "Dark mode": "Тёмная тема",
+        "Light mode": "Светлая тема",
+        "Ready": "Готово",
+        "Translate into": "Перевести на",
+        "Load what's on disk": "Загрузить с диска",
+        "Pull latest text": "Обновить текст",
+        "Original": "Оригинал",
+        "Translation": "Перевод",
+        "Apply": "Применить",
+        "Copy the original across": "Скопировать оригинал",
+        "Next one missing": "Следующая непереведённая",
+        "Only show lines still missing": "Только непереведённые",
+        "Export interface template...": "Экспорт шаблона интерфейса...",
+    },
+    "polish": {
+        "  Dialogue  ": "  Dialog  ",
+        "  Quest wording  ": "  Teksty zadań  ",
+        "  Translations  ": "  Tłumaczenia  ",
+        "  Menu appearance  ": "  Wygląd okna  ",
+        "  Global AI settings  ": "  Globalne AI  ",
+        "  Factions  ": "  Frakcje  ",
+        "  AI patrols  ": "  Patrole AI  ",
+        "  Server files  ": "  Pliki serwera  ",
+        "New (blank)": "Nowy (pusty)",
+        "Open file...": "Otwórz plik...",
+        "Save": "Zapisz",
+        "Save as / copy to...": "Zapisz jako / kopiuj...",
+        "Check this tab": "Sprawdź tę kartę",
+        "Check ALL config files": "Sprawdź WSZYSTKO",
+        "Browse...": "Przeglądaj...",
+        "Live preview": "Podgląd na żywo",
+        "Dark mode": "Tryb ciemny",
+        "Light mode": "Tryb jasny",
+        "Ready": "Gotowe",
+        "Translate into": "Przetłumacz na",
+        "Load what's on disk": "Wczytaj z dysku",
+        "Pull latest text": "Pobierz aktualny tekst",
+        "Original": "Oryginał",
+        "Translation": "Tłumaczenie",
+        "Apply": "Zastosuj",
+        "Copy the original across": "Skopiuj oryginał",
+        "Next one missing": "Następne brakujące",
+        "Only show lines still missing": "Pokaż tylko brakujące",
+        "Export interface template...": "Eksportuj szablon interfejsu...",
+    },
+    "hungarian": {
+        "  Dialogue  ": "  Párbeszéd  ",
+        "  Quest wording  ": "  Küldetésszöveg  ",
+        "  Translations  ": "  Fordítások  ",
+        "  Menu appearance  ": "  Ablak megjelenés  ",
+        "  Global AI settings  ": "  Globális MI  ",
+        "  Factions  ": "  Frakciók  ",
+        "  AI patrols  ": "  MI járőrök  ",
+        "  Server files  ": "  Szerverfájlok  ",
+        "New (blank)": "Új (üres)",
+        "Open file...": "Fájl megnyitása...",
+        "Save": "Mentés",
+        "Save as / copy to...": "Mentés másként / másolás...",
+        "Check this tab": "Fül ellenőrzése",
+        "Check ALL config files": "MINDEN fájl ellenőrzése",
+        "Browse...": "Tallózás...",
+        "Live preview": "Élő előnézet",
+        "Dark mode": "Sötét mód",
+        "Light mode": "Világos mód",
+        "Ready": "Kész",
+        "Translate into": "Fordítás erre",
+        "Load what's on disk": "Betöltés lemezről",
+        "Pull latest text": "Friss szöveg betöltése",
+        "Original": "Eredeti",
+        "Translation": "Fordítás",
+        "Apply": "Alkalmaz",
+        "Copy the original across": "Eredeti átmásolása",
+        "Next one missing": "Következő hiányzó",
+        "Only show lines still missing": "Csak a hiányzók",
+        "Export interface template...": "Felület-sablon exportálása...",
+    },
+    "italian": {
+        "  Dialogue  ": "  Dialogo  ",
+        "  Quest wording  ": "  Testi missioni  ",
+        "  Translations  ": "  Traduzioni  ",
+        "  Menu appearance  ": "  Aspetto finestra  ",
+        "  Global AI settings  ": "  IA globale  ",
+        "  Factions  ": "  Fazioni  ",
+        "  AI patrols  ": "  Pattuglie IA  ",
+        "  Server files  ": "  File del server  ",
+        "New (blank)": "Nuovo (vuoto)",
+        "Open file...": "Apri file...",
+        "Save": "Salva",
+        "Save as / copy to...": "Salva come / copia in...",
+        "Check this tab": "Controlla questa scheda",
+        "Check ALL config files": "Controlla TUTTO",
+        "Browse...": "Sfoglia...",
+        "Live preview": "Anteprima dal vivo",
+        "Dark mode": "Tema scuro",
+        "Light mode": "Tema chiaro",
+        "Ready": "Pronto",
+        "Translate into": "Traduci in",
+        "Load what's on disk": "Carica dal disco",
+        "Pull latest text": "Aggiorna il testo",
+        "Original": "Originale",
+        "Translation": "Traduzione",
+        "Apply": "Applica",
+        "Copy the original across": "Copia l'originale",
+        "Next one missing": "Prossima mancante",
+        "Only show lines still missing": "Mostra solo le mancanti",
+        "Export interface template...": "Esporta modello interfaccia...",
+    },
+    "spanish": {
+        "  Dialogue  ": "  Diálogo  ",
+        "  Quest wording  ": "  Textos de misión  ",
+        "  Translations  ": "  Traducciones  ",
+        "  Menu appearance  ": "  Aspecto de ventana  ",
+        "  Global AI settings  ": "  IA global  ",
+        "  Factions  ": "  Facciones  ",
+        "  AI patrols  ": "  Patrullas IA  ",
+        "  Server files  ": "  Archivos del servidor  ",
+        "New (blank)": "Nuevo (vacío)",
+        "Open file...": "Abrir archivo...",
+        "Save": "Guardar",
+        "Save as / copy to...": "Guardar como / copiar a...",
+        "Check this tab": "Revisar esta pestaña",
+        "Check ALL config files": "Revisar TODO",
+        "Browse...": "Examinar...",
+        "Live preview": "Vista previa",
+        "Dark mode": "Modo oscuro",
+        "Light mode": "Modo claro",
+        "Ready": "Listo",
+        "Translate into": "Traducir a",
+        "Load what's on disk": "Cargar desde el disco",
+        "Pull latest text": "Traer el texto actual",
+        "Original": "Original",
+        "Translation": "Traducción",
+        "Apply": "Aplicar",
+        "Copy the original across": "Copiar el original",
+        "Next one missing": "Siguiente sin traducir",
+        "Only show lines still missing": "Solo las que faltan",
+        "Export interface template...": "Exportar plantilla de interfaz...",
+    },
+    "french": {
+        "  Dialogue  ": "  Dialogue  ",
+        "  Quest wording  ": "  Textes de quête  ",
+        "  Translations  ": "  Traductions  ",
+        "  Menu appearance  ": "  Apparence  ",
+        "  Global AI settings  ": "  IA globale  ",
+        "  Factions  ": "  Factions  ",
+        "  AI patrols  ": "  Patrouilles IA  ",
+        "  Server files  ": "  Fichiers serveur  ",
+        "New (blank)": "Nouveau (vide)",
+        "Open file...": "Ouvrir un fichier...",
+        "Save": "Enregistrer",
+        "Save as / copy to...": "Enregistrer sous / copier...",
+        "Check this tab": "Vérifier cet onglet",
+        "Check ALL config files": "TOUT vérifier",
+        "Browse...": "Parcourir...",
+        "Live preview": "Aperçu en direct",
+        "Dark mode": "Mode sombre",
+        "Light mode": "Mode clair",
+        "Ready": "Prêt",
+        "Translate into": "Traduire vers",
+        "Load what's on disk": "Charger depuis le disque",
+        "Pull latest text": "Récupérer le texte",
+        "Original": "Original",
+        "Translation": "Traduction",
+        "Apply": "Appliquer",
+        "Copy the original across": "Copier l'original",
+        "Next one missing": "Suivante non traduite",
+        "Only show lines still missing": "Afficher seulement les manquantes",
+        "Export interface template...": "Exporter le modèle d'interface...",
+    },
+    "chinese": {
+        "  Dialogue  ": "  對話  ",
+        "  Quest wording  ": "  任務文字  ",
+        "  Translations  ": "  翻譯  ",
+        "  Menu appearance  ": "  視窗外觀  ",
+        "  Global AI settings  ": "  全域 AI  ",
+        "  Factions  ": "  陣營  ",
+        "  AI patrols  ": "  AI 巡邏  ",
+        "  Server files  ": "  伺服器檔案  ",
+        "New (blank)": "新建（空白）",
+        "Open file...": "開啟檔案...",
+        "Save": "儲存",
+        "Save as / copy to...": "另存為 / 複製到...",
+        "Check this tab": "檢查此分頁",
+        "Check ALL config files": "檢查全部設定檔",
+        "Browse...": "瀏覽...",
+        "Live preview": "即時預覽",
+        "Dark mode": "深色模式",
+        "Light mode": "淺色模式",
+        "Ready": "就緒",
+        "Translate into": "翻譯成",
+        "Load what's on disk": "從磁碟載入",
+        "Pull latest text": "取得最新文字",
+        "Original": "原文",
+        "Translation": "翻譯",
+        "Apply": "套用",
+        "Copy the original across": "複製原文",
+        "Next one missing": "下一個未翻譯",
+        "Only show lines still missing": "只顯示未翻譯",
+        "Export interface template...": "匯出介面範本...",
+    },
+    "japanese": {
+        "  Dialogue  ": "  会話  ",
+        "  Quest wording  ": "  クエスト文  ",
+        "  Translations  ": "  翻訳  ",
+        "  Menu appearance  ": "  ウィンドウ外観  ",
+        "  Global AI settings  ": "  AI 全体設定  ",
+        "  Factions  ": "  勢力  ",
+        "  AI patrols  ": "  AI パトロール  ",
+        "  Server files  ": "  サーバーファイル  ",
+        "New (blank)": "新規（空）",
+        "Open file...": "ファイルを開く...",
+        "Save": "保存",
+        "Save as / copy to...": "名前を付けて保存 / コピー...",
+        "Check this tab": "このタブを確認",
+        "Check ALL config files": "すべての設定を確認",
+        "Browse...": "参照...",
+        "Live preview": "ライブプレビュー",
+        "Dark mode": "ダークモード",
+        "Light mode": "ライトモード",
+        "Ready": "準備完了",
+        "Translate into": "翻訳先",
+        "Load what's on disk": "ディスクから読み込む",
+        "Pull latest text": "最新のテキストを取得",
+        "Original": "原文",
+        "Translation": "翻訳",
+        "Apply": "適用",
+        "Copy the original across": "原文をコピー",
+        "Next one missing": "次の未翻訳",
+        "Only show lines still missing": "未翻訳のみ表示",
+        "Export interface template...": "UI テンプレートを書き出す...",
+    },
+    "portuguese": {
+        "  Dialogue  ": "  Diálogo  ",
+        "  Quest wording  ": "  Textos de missão  ",
+        "  Translations  ": "  Traduções  ",
+        "  Menu appearance  ": "  Aparência da janela  ",
+        "  Global AI settings  ": "  IA global  ",
+        "  Factions  ": "  Facções  ",
+        "  AI patrols  ": "  Patrulhas de IA  ",
+        "  Server files  ": "  Ficheiros do servidor  ",
+        "New (blank)": "Novo (vazio)",
+        "Open file...": "Abrir ficheiro...",
+        "Save": "Guardar",
+        "Save as / copy to...": "Guardar como / copiar para...",
+        "Check this tab": "Verificar este separador",
+        "Check ALL config files": "Verificar TUDO",
+        "Browse...": "Procurar...",
+        "Live preview": "Pré-visualização",
+        "Dark mode": "Modo escuro",
+        "Light mode": "Modo claro",
+        "Ready": "Pronto",
+        "Translate into": "Traduzir para",
+        "Load what's on disk": "Carregar do disco",
+        "Pull latest text": "Obter o texto atual",
+        "Original": "Original",
+        "Translation": "Tradução",
+        "Apply": "Aplicar",
+        "Copy the original across": "Copiar o original",
+        "Next one missing": "Próxima em falta",
+        "Only show lines still missing": "Mostrar só as que faltam",
+        "Export interface template...": "Exportar modelo da interface...",
+    },
+    "chinesesimp": {
+        "  Dialogue  ": "  对话  ",
+        "  Quest wording  ": "  任务文本  ",
+        "  Translations  ": "  翻译  ",
+        "  Menu appearance  ": "  窗口外观  ",
+        "  Global AI settings  ": "  全局 AI  ",
+        "  Factions  ": "  阵营  ",
+        "  AI patrols  ": "  AI 巡逻  ",
+        "  Server files  ": "  服务器文件  ",
+        "New (blank)": "新建（空白）",
+        "Open file...": "打开文件...",
+        "Save": "保存",
+        "Save as / copy to...": "另存为 / 复制到...",
+        "Check this tab": "检查此标签页",
+        "Check ALL config files": "检查全部配置文件",
+        "Browse...": "浏览...",
+        "Live preview": "实时预览",
+        "Dark mode": "深色模式",
+        "Light mode": "浅色模式",
+        "Ready": "就绪",
+        "Translate into": "翻译为",
+        "Load what's on disk": "从磁盘加载",
+        "Pull latest text": "获取最新文本",
+        "Original": "原文",
+        "Translation": "翻译",
+        "Apply": "应用",
+        "Copy the original across": "复制原文",
+        "Next one missing": "下一个未翻译",
+        "Only show lines still missing": "仅显示未翻译",
+        "Export interface template...": "导出界面模板...",
+    },
+}
+
+_UI_STATE = {"code": "english", "map": {}, "seen": set()}
+
+
+def tr(text):
+    """Translate one interface string. Unknown strings pass straight through."""
+    if not text:
+        return text
+    _UI_STATE["seen"].add(text)
+    return _UI_STATE["map"].get(text, text)
+
+
+def ui_language_code():
+    return _UI_STATE["code"]
+
+
+def external_locale_path():
+    """Optional override file sitting next to the .exe (or the script), so a
+    translator can ship a language without rebuilding anything."""
+    import sys
+    if getattr(sys, "frozen", False):
+        folder = os.path.dirname(sys.executable)
+    else:
+        folder = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(folder, "DialogueForge_locales.json")
+
+
+def load_ui_language(code):
+    code = (code or "english").lower()
+    if code not in LANGUAGE_LABELS:
+        code = "english"
+
+    merged = dict(UI_TRANSLATIONS.get(code) or {})
+    try:
+        with open(external_locale_path(), "r", encoding="utf-8") as handle:
+            external = json.load(handle)
+        for key, value in (external.get(code) or {}).items():
+            if str(value).strip():
+                merged[key] = value
+    except Exception:
+        pass
+
+    _UI_STATE["code"] = code
+    _UI_STATE["map"] = merged
+    return len(merged)
+
+
+def quest_flow_rows(data, rel_path):
+    """Every place one conversation mentions a quest, as flat rows.
+    Walks the base tree and every story tree."""
+    rows = []
+
+    def walk(nodes, where_prefix):
+        for node in nodes or []:
+            node_id = safe_int(node.get("ID", 1), 1)
+            for index, response in enumerate(node.get("Responses") or []):
+                text = str(response.get("Text", "") or "")
+                where = "%snode %d, option %d" % (where_prefix, node_id,
+                                                 index + 1)
+                action = str(response.get("ActionType", "NONE") or "NONE")
+
+                shown = safe_int(response.get("RequiredQuestID", -1), -1)
+                hidden = safe_int(response.get("HideAfterQuestID", -1), -1)
+                used = safe_int(response.get("QuestID", -1), -1)
+
+                if shown > 0:
+                    rows.append((shown, "shown after", rel_path, where, text))
+                if hidden > 0:
+                    rows.append((hidden, "hidden after", rel_path, where, text))
+                if used > 0:
+                    verb = "offered by" if action == "OFFER_QUEST"                         else "handed over by"
+                    rows.append((used, verb, rel_path, where, text))
+
+            for index, line in enumerate(node.get("SpeakerLines") or []):
+                gate = safe_int(line.get("RequiredQuestID", -1), -1)
+                if gate > 0:
+                    rows.append((gate, "shown after", rel_path,
+                                 "%snode %d, alternate line %d"
+                                 % (where_prefix, node_id, index + 1),
+                                 str(line.get("Text", "") or "")))
+                override = safe_int(line.get("OverrideQuestID", -1), -1)
+                if override > 0:
+                    rows.append((override, "takes over after", rel_path,
+                                 "%snode %d, alternate line %d"
+                                 % (where_prefix, node_id, index + 1),
+                                 str(line.get("Text", "") or "")))
+
+    walk(data.get("Nodes"), "")
+    for stage_index, stage in enumerate(data.get("Stages") or []):
+        walk(stage.get("Nodes"), "story tree %d, " % (stage_index + 1))
+        required = safe_int(stage.get("RequiredQuestID", -1), -1)
+        if required > 0:
+            rows.append((required, "unlocks story tree", rel_path,
+                         "story tree %d" % (stage_index + 1), ""))
+
+    return rows
+
+
+def quest_flow_problems(data, rel_path, known_quest_ids):
+    """The mistakes that are invisible in game: a line that can never show,
+    an action pointing nowhere, a quest id that doesn't exist."""
+    problems = []
+
+    def check(nodes, where_prefix):
+        for node in nodes or []:
+            node_id = safe_int(node.get("ID", 1), 1)
+            for index, response in enumerate(node.get("Responses") or []):
+                where = "%s: %snode %d, option %d" % (
+                    rel_path, where_prefix, node_id, index + 1)
+                action = str(response.get("ActionType", "NONE") or "NONE")
+                shown = safe_int(response.get("RequiredQuestID", -1), -1)
+                hidden = safe_int(response.get("HideAfterQuestID", -1), -1)
+                used = safe_int(response.get("QuestID", -1), -1)
+
+                if shown > 0 and shown == hidden:
+                    problems.append(
+                        "%s shows after quest %d and hides after the same "
+                        "quest, so it can never be seen." % (where, shown))
+
+                if action in ("OFFER_QUEST",) and used <= 0:
+                    problems.append(
+                        "%s uses OFFER_QUEST but names no quest, so it will "
+                        "just close the window." % where)
+
+                for quest_id, label in ((shown, "shows after"),
+                                        (hidden, "hides after"),
+                                        (used, "acts on")):
+                    if quest_id > 0 and known_quest_ids                             and quest_id not in known_quest_ids:
+                        problems.append(
+                            "%s %s quest %d, which isn't in your quest "
+                            "folder." % (where, label, quest_id))
+
+    check(data.get("Nodes"), "")
+    for stage_index, stage in enumerate(data.get("Stages") or []):
+        check(stage.get("Nodes"), "story tree %d, " % (stage_index + 1))
+
+    return problems
+
+
+def build_quest_flow_report(rows, problems, quest_namer):
+    """The text file itself, written to be read rather than parsed."""
+    out = []
+    out.append("DIALOGUE QUEST FLOW")
+    out.append("=" * 60)
+    out.append("")
+    out.append("Every place your conversations mention a quest, so you don't")
+    out.append("have to hold it all in your head. Regenerate this whenever")
+    out.append("you change a quest lock.")
+    out.append("")
+
+    if problems:
+        out.append("PROBLEMS (%d)" % len(problems))
+        out.append("-" * 60)
+        for problem in problems:
+            out.append("  - " + problem)
+        out.append("")
+    else:
+        out.append("No problems found.")
+        out.append("")
+
+    out.append("BY QUEST")
+    out.append("-" * 60)
+    if not rows:
+        out.append("  Nothing in your conversations refers to a quest yet.")
+    for quest_id in sorted(set(r[0] for r in rows)):
+        out.append("")
+        out.append("  Quest %d  %s" % (quest_id, quest_namer(quest_id)))
+        for verb in ("offered by", "handed over by", "shown after",
+                     "hidden after", "takes over after",
+                     "unlocks story tree"):
+            for row in [r for r in rows if r[0] == quest_id and r[1] == verb]:
+                line = "      %-18s %s  %s" % (verb, row[2], row[3])
+                if row[4]:
+                    out.append(line + '   "' + short_one_line(row[4], 46) + '"')
+                else:
+                    out.append(line)
+    out.append("")
+
+    out.append("BY CONVERSATION")
+    out.append("-" * 60)
+    for path in sorted(set(r[2] for r in rows)):
+        out.append("")
+        out.append("  " + path)
+        for row in [r for r in rows if r[2] == path]:
+            detail = "%s quest %d (%s)" % (row[1], row[0],
+                                           quest_namer(row[0]))
+            out.append("      %-34s %s" % (row[3], detail))
+    out.append("")
+
+    return chr(10).join(out)
+
+
+def looks_like_localization(data):
+    """A Localization overlay, as opposed to a tree or a quest wording file.
+    Told apart by its Entries blocks -- a QuestText file has plain lists."""
+    if "Trees" in data:
+        return True
+    for block in (data.get("Quests") or []):
+        if isinstance(block, dict) and "Entries" in block:
+            return True
+    return False
+
+
+def short_one_line(text, limit=70):
+    """Collapse a possibly multi-line string down to one readable row."""
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= limit:
+        return flat
+    return flat[:limit - 3] + "..."
 
 
 def write_json(path, data):
@@ -1813,11 +2581,12 @@ def validate_menu_dict(cfg, resolved=None):
             % (style, ", ".join(key for key, _d in FONT_STYLES)))
 
     version = cfg.get("ConfigVersion")
-    if isinstance(version, int) and version < 3:
+    if isinstance(version, int) and version < 6:
         warnings.append(
-            "ConfigVersion is %s. FontStyle arrived in version 2 and "
-            "ShowResponseIcons in version 3 - saving from here updates it."
-            % version)
+            "ConfigVersion is %s. FontStyle arrived in version 2, "
+            "ShowResponseIcons in 3, ShowLanguageButton in 4, "
+            "ScaleTextWithPanel in 5 and ShowErrorNotifications in 6 - "
+            "saving from here updates it." % version)
 
     if cfg.get("ShowResponseIcons") and override_uses_custom_layout(cfg):
         warnings.append(
@@ -2494,10 +3263,25 @@ class DialogueTab(ttk.Frame):
                                      style="Hint.TLabel")
         self.action_hint.grid(row=2, column=1, sticky="w", padx=4)
 
-        ttk.Label(fields, text="Next node").grid(row=3, column=0,
+        ttk.Label(fields, text="Quest to use").grid(row=3, column=0,
+                                                    sticky="w", pady=3)
+        action_quest_row = ttk.Frame(fields)
+        action_quest_row.grid(row=3, column=1, sticky="w", padx=4, pady=3)
+        self.action_quest = ttk.Combobox(action_quest_row, width=28)
+        self.action_quest.pack(side="left")
+        self.action_quest.bind("<<ComboboxSelected>>", self.on_gate_changed)
+        self.action_quest.bind("<KeyRelease>", self.on_gate_changed)
+        ttk.Button(action_quest_row, text="Browse quests...", width=16,
+                   command=self.browse_action_quest).pack(side="left", padx=6)
+
+        self.action_quest_note = ttk.Label(fields, text="", wraplength=430,
+                                           style="Hint.TLabel")
+        self.action_quest_note.grid(row=4, column=1, sticky="w", padx=4)
+
+        ttk.Label(fields, text="Next node").grid(row=5, column=0,
                                                  sticky="w", pady=3)
         next_row = ttk.Frame(fields)
-        next_row.grid(row=3, column=1, sticky="w", padx=4, pady=3)
+        next_row.grid(row=5, column=1, sticky="w", padx=4, pady=3)
         self.next_node = ttk.Combobox(next_row, width=19, state="readonly")
         self.next_node.pack(side="left")
         self.next_node.bind("<<ComboboxSelected>>",
@@ -2506,7 +3290,7 @@ class DialogueTab(ttk.Frame):
                    command=self.jump_to_next).pack(side="left", padx=6)
 
         gate_section = CollapsibleSection(
-            editor, "Show only after a quest completes  (optional)")
+            editor, "Show / hide based on quest  (optional)")
         gate_section.pack(fill="x", padx=6, pady=(2, 6))
         gate_box = gate_section.content()
         gate_row = ttk.Frame(gate_box)
@@ -2522,6 +3306,21 @@ class DialogueTab(ttk.Frame):
         self.gate_note = ttk.Label(gate_box, text="", wraplength=430,
                                    style="Hint.TLabel")
         self.gate_note.pack(anchor="w", padx=6, pady=(0, 4))
+
+        hide_row = ttk.Frame(gate_box)
+        hide_row.pack(fill="x", padx=6, pady=(4, 2))
+        ttk.Label(hide_row, text="Hide after").pack(side="left")
+        self.hide_quest = ttk.Combobox(hide_row, width=34)
+        self.hide_quest.pack(side="left", padx=(4, 0))
+        self.hide_quest.bind("<<ComboboxSelected>>", self.on_gate_changed)
+        self.hide_quest.bind("<KeyRelease>", self.on_gate_changed)
+        ttk.Button(hide_row, text="Browse quests...", width=16,
+                   command=self.browse_hide_quest).pack(side="left", padx=6)
+
+        self.hide_note = ttk.Label(gate_box, text="", wraplength=430,
+                                   style="Hint.TLabel")
+        self.hide_note.pack(anchor="w", padx=6, pady=(0, 4))
+
 
         var_section = CollapsibleSection(
             editor, "Reputation & story flags  (optional)")
@@ -2647,7 +3446,7 @@ class DialogueTab(ttk.Frame):
         node = self.current_node
         if not node:
             return PreviewScene(
-                "Conversation", speaker, "", [],
+                "Conversation screen", speaker, "", [],
                 "Pick a node in the outline to see it here.")
 
         buttons = []
@@ -2680,7 +3479,7 @@ class DialogueTab(ttk.Frame):
                               "quest is done" % overrides)
             note = (note + "   •   " + variation) if note else variation
         return PreviewScene(
-            "Conversation - node %s" % node.get("ID"), speaker,
+            "Conversation screen  —  node %s" % node.get("ID"), speaker,
             line, buttons, note)
 
     def speaker_label(self):
@@ -3270,11 +4069,17 @@ class DialogueTab(ttk.Frame):
         self.action_type.set("")
         self.next_node.set("")
         self.gate_quest.set(NOT_LOCKED_LABEL)
+        self.hide_quest.set(NEVER_HIDDEN_LABEL)
+        self.action_quest.set(NO_ACTION_QUEST_LABEL)
         self.gate_note.configure(text="")
+        self.hide_note.configure(text="")
+        self.action_quest_note.configure(text="")
         self.action_hint.configure(
             text="Pick an option in the outline, or add one.")
         self.next_node.configure(state="disabled")
         self.gate_quest.configure(state="disabled")
+        self.hide_quest.configure(state="disabled")
+        self.action_quest.configure(state="disabled")
         if hasattr(self, "require_vars"):
             self.set_vars.set_ops([])
             self.require_vars.set_ops([])
@@ -3311,6 +4116,14 @@ class DialogueTab(ttk.Frame):
         gate = response.get("RequiredQuestID", -1)
         self.refresh_quest_choices()
         self.set_gate_value(gate)
+
+        hide = safe_int(response.get("HideAfterQuestID", -1), -1)
+        self.hide_quest.set(self.app.quest_label(hide) if hide > 0
+                            else NEVER_HIDDEN_LABEL)
+        action_quest = safe_int(response.get("QuestID", -1), -1)
+        self.action_quest.set(self.app.quest_label(action_quest)
+                              if action_quest > 0 else NO_ACTION_QUEST_LABEL)
+        self.update_action_state()
         if hasattr(self, "require_vars"):
             self.set_vars.set_ops(response.get("SetVars"))
             self.require_vars.set_ops(response.get("RequiredVars"))
@@ -3321,7 +4134,10 @@ class DialogueTab(ttk.Frame):
         self.update_action_state()
 
     def refresh_quest_choices(self):
-        self.gate_quest["values"] = [NOT_LOCKED_LABEL] + self.app.quest_labels()
+        labels = self.app.quest_labels()
+        self.gate_quest["values"] = [NOT_LOCKED_LABEL] + labels
+        self.hide_quest["values"] = [NEVER_HIDDEN_LABEL] + labels
+        self.action_quest["values"] = [NO_ACTION_QUEST_LABEL] + labels
         self.update_gate_note()
         if hasattr(self, "speaker_lines"):
             self.speaker_lines.refresh_quest_choices()
@@ -3376,6 +4192,80 @@ class DialogueTab(ttk.Frame):
         self.update_gate_note()
         self.commit_response()
 
+        self.update_extra_quest_notes()
+
+    def _pick_quest(self, title, hint):
+        if not self.app.ensure_quest_folder():
+            return None
+        if not self.app.quest_index:
+            messagebox.showinfo(
+                APP_TITLE,
+                "No quest configs found in that folder. Point it at the "
+                "folder holding your Expansion quest .json files.",
+                parent=self)
+            return None
+        dialog = ChooserDialog(self.app, title, self.app.quest_index, hint)
+        self.wait_window(dialog)
+        return dialog.chosen
+
+    def browse_hide_quest(self):
+        chosen = self._pick_quest(
+            "Pick a quest",
+            "The option DISAPPEARS once the player has completed the quest "
+            "you pick. Use it to retire a line that no longer makes sense.")
+        if chosen is None:
+            return
+        self.hide_quest.set(self.app.quest_label(chosen) if chosen > 0
+                            else NEVER_HIDDEN_LABEL)
+        self.update_gate_note()
+        self.commit_response()
+
+    def browse_action_quest(self):
+        chosen = self._pick_quest(
+            "Pick a quest",
+            "The quest this option offers or hands over when clicked.")
+        if chosen is None:
+            return
+        self.action_quest.set(self.app.quest_label(chosen) if chosen > 0
+                              else NO_ACTION_QUEST_LABEL)
+        self.update_gate_note()
+        self.commit_response()
+
+    def update_extra_quest_notes(self):
+        hide_text = self.hide_quest.get().strip()
+        if not hide_text or hide_text == NEVER_HIDDEN_LABEL:
+            self.hide_note.configure(text="")
+        else:
+            self.hide_note.configure(
+                text="Disappears once the player has completed “%s”."
+                     % hide_text)
+
+        action = self.action_type.get()
+        quest_text = self.action_quest.get().strip()
+        blank = not quest_text or quest_text == NO_ACTION_QUEST_LABEL
+
+        if action == "OFFER_QUEST":
+            if blank:
+                self.action_quest_note.configure(
+                    text="Pick a quest - without one this option does "
+                         "nothing but close the window.")
+            else:
+                self.action_quest_note.configure(
+                    text="Opens the offer screen for “%s”, where the "
+                         "player can read it and accept or decline."
+                         % quest_text)
+        elif action == "ACCEPT_QUEST":
+            if blank:
+                self.action_quest_note.configure(
+                    text="No quest picked, so this only works inside the "
+                         "live quest-detail step the mod builds itself.")
+            else:
+                self.action_quest_note.configure(
+                    text="Hands “%s” straight over, with no offer "
+                         "screen." % quest_text)
+        else:
+            self.action_quest_note.configure(text="")
+
     def set_gate_value(self, quest_id):
         if quest_id and quest_id > 0:
             self.gate_quest.set(self.app.quest_label(quest_id))
@@ -3388,6 +4278,13 @@ class DialogueTab(ttk.Frame):
         self.next_node.configure(
             state="readonly" if action == "NONE" else "disabled")
         self.gate_quest.configure(state="normal")
+        self.hide_quest.configure(state="normal")
+
+        uses_quest = action in ("OFFER_QUEST", "ACCEPT_QUEST")
+        self.action_quest.configure(state="normal" if uses_quest else "disabled")
+        if not uses_quest:
+            self.action_quest.set(NO_ACTION_QUEST_LABEL)
+
         self.update_gate_note()
 
     def on_action_changed(self, _event=None):
@@ -3416,6 +4313,18 @@ class DialogueTab(ttk.Frame):
         else:
             response["RequiredQuestID"] = max(
                 1, quest_id_from_label(gate_text, 1))
+        hide_text = self.hide_quest.get().strip()
+        if not hide_text or hide_text == NEVER_HIDDEN_LABEL:
+            response["HideAfterQuestID"] = -1
+        else:
+            response["HideAfterQuestID"] = max(
+                1, quest_id_from_label(hide_text, 1))
+        action_quest_text = self.action_quest.get().strip()
+        if not action_quest_text                 or action_quest_text == NO_ACTION_QUEST_LABEL:
+            response["QuestID"] = -1
+        else:
+            response["QuestID"] = max(
+                1, quest_id_from_label(action_quest_text, 1))
         if hasattr(self, "require_vars"):
             response["SetVars"] = self.set_vars.get_ops()
             response["RequiredVars"] = self.require_vars.get_ops()
@@ -3764,6 +4673,12 @@ class DialogueTab(ttk.Frame):
                 set_vars = clean_var_ops(response.get("SetVars"))
                 if set_vars:
                     resp_entry["SetVars"] = set_vars
+                hide_after = safe_int(response.get("HideAfterQuestID", -1), -1)
+                if hide_after > 0:
+                    resp_entry["HideAfterQuestID"] = hide_after
+                action_quest = safe_int(response.get("QuestID", -1), -1)
+                if action_quest > 0:
+                    resp_entry["QuestID"] = action_quest
                 max_uses = safe_int(response.get("MaxUses", 0), 0)
                 if max_uses > 0:
                     resp_entry["MaxUses"] = max_uses
@@ -3861,7 +4776,7 @@ class QuestTextTab(ttk.Frame):
                  "Blank shows no back button on this screen.")
 
     SCREEN_GROUPS = [
-        ("Offer screen  —  quest not started", [
+        ("Quest offer screen  —  not started yet", [
             ("AcceptTexts", "Accept  (Player says)",
              "One button per line."),
             ("DeclineTexts", "Turn it down  (Player says)",
@@ -3869,13 +4784,13 @@ class QuestTextTab(ttk.Frame):
             ("OfferBackTexts", "Back to the conversation  (Player says)",
              BACK_HINT),
         ]),
-        ("In-progress screen  —  quest running", [
+        ("Quest in-progress screen  —  accepted, not finished", [
             ("InProgressTexts", "While it's running  (Player says)",
              "One button per line."),
             ("InProgressBackTexts", "Back to the conversation  (Player says)",
              BACK_HINT),
         ]),
-        ("Turn-in screen  —  ready to hand in", [
+        ("Quest turn-in screen  —  ready to hand in", [
             ("TurnInTexts", "Hand it in  (Player says)",
              "One button per line."),
             ("NotYetTexts", "Not finished yet  (Player says)",
@@ -3886,13 +4801,13 @@ class QuestTextTab(ttk.Frame):
     ]
 
     COMPLETED_GROUPS = [
-        ("Quest list greeting  —  once this quest is completed", [
+        ("Quest list screen  —  once this quest is completed", [
             ("QuestListTexts", "Line above their quest list  (NPC says)",
              "One line picked at random."),
             ("QuestListBackTexts", "Back to the conversation  (Player says)",
              BACK_HINT),
         ]),
-        ("Nothing-left screen  —  once this quest is completed", [
+        ("No-quests screen  —  once this quest is completed", [
             ("NoQuestsTexts", "What they say with nothing left  (NPC says)",
              "One line picked at random."),
             ("NoQuestsLeaveTexts", "Buttons that end the chat  (Player says)",
@@ -3986,7 +4901,7 @@ class QuestTextTab(ttk.Frame):
             self._build_screen_box(right, title, specs, expanded=(i == 0))
 
         reward_section = CollapsibleSection(
-            right, "Reward picker  (NPC says, optional)", expanded=False)
+            right, "Reward choice screen  (NPC says, optional)", expanded=False)
         reward_section.pack(fill="x", padx=2, pady=(0, 4))
         reward = reward_section.content()
         ttk.Label(reward,
@@ -4391,7 +5306,7 @@ class QuestTextTab(ttk.Frame):
 
         if screen == "offer":
             return PreviewScene(
-                "Quest offered", speaker,
+                "Quest offer screen", speaker,
                 self.current_desc()
                 or "(the quest's own description shows here)",
                 rows("AcceptTexts") + rows("DeclineTexts")
@@ -4400,7 +5315,7 @@ class QuestTextTab(ttk.Frame):
 
         if screen == "progress":
             return PreviewScene(
-                "Quest in progress", speaker,
+                "Quest in-progress screen", speaker,
                 "(the quest's own progress text shows here)",
                 rows("InProgressTexts") + rows("InProgressBackTexts"))
 
@@ -4413,7 +5328,7 @@ class QuestTextTab(ttk.Frame):
             turnin_line = (entry.get("desc_turnin") if entry else "") \
                 or "(the quest's own turn-in text shows here)"
             return PreviewScene(
-                "Ready to hand in", turnin_speaker, turnin_line,
+                "Quest turn-in screen", turnin_speaker, turnin_line,
                 rows("TurnInTexts") + rows("NotYetTexts")
                 + rows("TurnInBackTexts"),
                 "Hand-in first, then not-yet, then any back buttons.")
@@ -4421,7 +5336,7 @@ class QuestTextTab(ttk.Frame):
         if screen == "reward":
             reward = self.reward_text.get()
             return PreviewScene(
-                "Reward picker", speaker, reward,
+                "Reward choice screen", speaker, reward,
                 [("Canned Beans x4", "normal", "chat"),
                  ("Ammo Box", "normal", "chat"),
                  ("Field Bandage x2", "normal", "chat")],
@@ -4433,7 +5348,7 @@ class QuestTextTab(ttk.Frame):
             if lines:
                 first = lines[0]
             return PreviewScene(
-                "Their quest list", speaker, first,
+                "Quest list screen", speaker, first,
                 [("Clear the barn", "normal", "chat"),
                  ("Haul timber from the mill", "normal", "chat")]
                 + rows("QuestListBackTexts"),
@@ -4445,7 +5360,7 @@ class QuestTextTab(ttk.Frame):
         if lines:
             first = lines[0]
         return PreviewScene(
-            "No quests available", speaker, first,
+            "No-quests screen", speaker, first,
             rows("NoQuestsBackTexts") + rows("NoQuestsLeaveTexts"),
             "Shown once this quest is completed and the NPC has nothing "
             "left. Blank buttons still give the player a Back button.")
@@ -4495,6 +5410,9 @@ class MenuConfigTab(ttk.Frame):
         ttk.Frame.__init__(self, master)
         self.app = app
         self.config = default_menu_config()
+        #! Never write a version older than the file came in as - a newer mod
+        #! may have bumped it past what this build knows about.
+        self.config_version = 0
 
         body = ttk.PanedWindow(self, orient="horizontal")
         body.pack(fill="both", expand=True, padx=6, pady=6)
@@ -4619,6 +5537,43 @@ class MenuConfigTab(ttk.Frame):
         self.font_note = ttk.Label(row, text="", style="Hint.TLabel")
         self.font_note.pack(side="left", padx=(4, 0))
 
+        language_row = ttk.Frame(fonts)
+        language_row.pack(fill="x", padx=6, pady=(2, 0))
+        self.show_language = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            language_row, text="Let players pick their language",
+            variable=self.show_language,
+            command=self.on_change).pack(side="left")
+
+        self.scale_text = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            language_row, text="Option text scales with panel size",
+            variable=self.scale_text,
+            command=self.on_change).pack(side="left", padx=(14, 0))
+
+        notify_row = ttk.Frame(fonts)
+        notify_row.pack(fill="x", padx=6, pady=(2, 0))
+        self.error_notifications = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            notify_row,
+            text="Tell players on screen when an option is misconfigured",
+            variable=self.error_notifications,
+            command=self.on_change).pack(side="left")
+
+        ttk.Label(fonts,
+                  text="A short pop-up so a player isn't left staring at a "
+                       "window that closed for no reason. The full reason "
+                       "always goes to your log either way.",
+                  wraplength=420, style="Hint.TLabel").pack(
+            anchor="w", padx=6, pady=(0, 4))
+
+        ttk.Label(fonts,
+                  text="The language option only ever appears if you have "
+                       "translations in Localization\\ - a single-language "
+                       "server never sees it either way.",
+                  wraplength=420, style="Hint.TLabel").pack(
+            anchor="w", padx=6, pady=(0, 2))
+
         ttk.Label(fonts,
                   text="Built into the mod, so no repacking needed. A custom "
                        "layout below overrides whatever is picked here.",
@@ -4705,13 +5660,16 @@ class MenuConfigTab(ttk.Frame):
             self.border_thickness.get(), 2)))
         cfg["FontStyle"] = self.font_style.get() or "DEFAULT"
         cfg["ShowResponseIcons"] = bool(self.show_icons.get())
+        cfg["ShowLanguageButton"] = bool(self.show_language.get())
+        cfg["ScaleTextWithPanel"] = bool(self.scale_text.get())
+        cfg["ShowErrorNotifications"] = bool(self.error_notifications.get())
         cfg["LayoutOverride"] = self.layout_override.get().strip()
         return cfg
 
     def build_output(self):
         cfg = self.gather()
         ordered = {
-            "ConfigVersion": 3,
+            "ConfigVersion": max(self.config_version, 6),
             "Position": cfg["Position"],
             "PanelWidth": cfg["PanelWidth"],
             "PanelHeight": cfg["PanelHeight"],
@@ -4725,6 +5683,9 @@ class MenuConfigTab(ttk.Frame):
         ordered["VisitedResponseOpacity"] = cfg["VisitedResponseOpacity"]
         ordered["FontStyle"] = cfg["FontStyle"]
         ordered["ShowResponseIcons"] = cfg["ShowResponseIcons"]
+        ordered["ShowLanguageButton"] = cfg["ShowLanguageButton"]
+        ordered["ScaleTextWithPanel"] = cfg["ScaleTextWithPanel"]
+        ordered["ShowErrorNotifications"] = cfg["ShowErrorNotifications"]
         ordered["LayoutOverride"] = cfg["LayoutOverride"]
         return ordered
 
@@ -4744,6 +5705,11 @@ class MenuConfigTab(ttk.Frame):
         self.border_thickness.insert(0, str(
             data.get("WindowBorderThickness", 2)))
         self.show_icons.set(bool(data.get("ShowResponseIcons", False)))
+        self.show_language.set(bool(data.get("ShowLanguageButton", True)))
+        self.scale_text.set(bool(data.get("ScaleTextWithPanel", False)))
+        self.error_notifications.set(
+            bool(data.get("ShowErrorNotifications", True)))
+        self.config_version = safe_int(data.get("ConfigVersion", 0), 0)
         style = str(data.get("FontStyle", "DEFAULT") or "DEFAULT").upper()
         if style not in dict(FONT_STYLES):
             style = "DEFAULT"
@@ -6023,6 +6989,480 @@ class FactionsTab(ttk.Frame):
         return issues, warnings
 
 
+class TranslationsTab(ttk.Frame):
+
+    SOURCE_TREE = "TREE"
+    SOURCE_QUEST = "QUEST"
+
+    def __init__(self, master, app):
+        ttk.Frame.__init__(self, master)
+        self.app = app
+
+        #! Each entry is a dict: scope ("tree"/"quest"), quest_id, key,
+        #! text (the original) and where (what the translator is looking at).
+        self.entries = []
+        #! language code -> {cache key: translation}. Kept in memory so
+        #! flicking between languages never loses a half-finished pass.
+        self.by_language = {}
+        self.current_index = None
+        self.source_path = None
+
+        self.source_kind = tk.StringVar(value=self.SOURCE_TREE)
+        self.language_label = tk.StringVar(value=LANGUAGE_LABELS["german"])
+        self.only_missing = tk.BooleanVar(value=False)
+        self.progress = tk.StringVar(value="")
+        self.source_note = tk.StringVar(value="")
+
+        head = ttk.Frame(self)
+        head.pack(fill="x", padx=8, pady=(8, 2))
+
+        ttk.Label(head, text="Translate into").pack(side="left")
+        self.language_box = ttk.Combobox(
+            head, textvariable=self.language_label, state="readonly", width=14,
+            values=[label for _code, label in TRANSLATION_LANGUAGES])
+        self.language_box.pack(side="left", padx=6)
+        self.language_box.bind("<<ComboboxSelected>>",
+                               lambda _e: self.on_language_change())
+
+        ttk.Button(head, text="Load what's on disk",
+                   command=self.load_existing).pack(side="left", padx=(4, 0))
+        ttk.Button(head, text="Pull latest text",
+                   command=self.refresh_source).pack(side="left", padx=6)
+
+        ttk.Label(head, textvariable=self.progress,
+                  style="Hint.TLabel").pack(side="right")
+
+        source = ttk.Frame(self)
+        source.pack(fill="x", padx=8, pady=(0, 2))
+        ttk.Radiobutton(source, text="The dialogue tree in the Dialogue tab",
+                        variable=self.source_kind, value=self.SOURCE_TREE,
+                        command=self.refresh_source).pack(side="left")
+        ttk.Radiobutton(source,
+                        text="The file in the Quest wording tab",
+                        variable=self.source_kind, value=self.SOURCE_QUEST,
+                        command=self.refresh_source).pack(side="left", padx=10)
+        ttk.Checkbutton(source, text="Only show lines still missing",
+                        variable=self.only_missing,
+                        command=self.refresh_list).pack(side="left", padx=10)
+
+        ttk.Label(self, textvariable=self.source_note,
+                  style="Hint.TLabel").pack(anchor="w", padx=8)
+
+        body = ttk.PanedWindow(self, orient="vertical")
+        body.pack(fill="both", expand=True, padx=8, pady=6)
+
+        list_frame = ttk.Frame(body)
+        body.add(list_frame, weight=3)
+
+        self.tree_view = ttk.Treeview(
+            list_frame, columns=("where", "original", "translation"),
+            show="headings", selectmode="browse")
+        self.tree_view.heading("where", text="Where it shows")
+        self.tree_view.heading("original", text="Original")
+        self.tree_view.heading("translation", text="Translation")
+        self.tree_view.column("where", width=250, stretch=False)
+        self.tree_view.column("original", width=340)
+        self.tree_view.column("translation", width=340)
+        self.tree_view.pack(side="left", fill="both", expand=True)
+        self.tree_view.bind("<<TreeviewSelect>>", self.on_row_select)
+
+        bar = ttk.Scrollbar(list_frame, orient="vertical",
+                            command=self.tree_view.yview)
+        bar.pack(side="right", fill="y")
+        self.tree_view.configure(yscrollcommand=bar.set)
+
+        detail = ttk.Frame(body)
+        body.add(detail, weight=2)
+        detail.columnconfigure(0, weight=1)
+        detail.columnconfigure(1, weight=1)
+        detail.rowconfigure(1, weight=1)
+
+        ttk.Label(detail, text="Original").grid(row=0, column=0, sticky="w")
+        self.original_box = tk.Text(detail, height=5, wrap="word")
+        self.original_box.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        self.original_box.configure(state="disabled")
+
+        ttk.Label(detail, text="Translation").grid(row=0, column=1, sticky="w")
+        self.translation_box = tk.Text(detail, height=5, wrap="word",
+                                       undo=True)
+        self.translation_box.grid(row=1, column=1, sticky="nsew")
+
+        buttons = ttk.Frame(detail)
+        buttons.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Button(buttons, text="Apply", command=self.apply_current).pack(
+            side="left")
+        ttk.Button(buttons, text="Copy the original across",
+                   command=self.copy_original).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Next one missing",
+                   command=self.jump_to_missing).pack(side="left")
+        ttk.Button(buttons, text="Export interface template...",
+                   command=self.app.export_ui_template).pack(side="left",
+                                                             padx=(20, 0))
+
+        ttk.Label(self,
+                  text="Your tree files never change - translations are saved "
+                       "next to them in Localization\\<language>\\. Anything "
+                       "you leave blank falls back to the original wording in "
+                       "game, so a half-finished language is safe to ship.",
+                  wraplength=1100, style="Hint.TLabel").pack(
+            anchor="w", padx=8, pady=(0, 8))
+
+        self.refresh_source()
+
+    # ---------------- state
+
+    def language_code(self):
+        label = self.language_label.get()
+        for code, text in TRANSLATION_LANGUAGES:
+            if text == label:
+                return code
+        return "german"
+
+    def store(self):
+        return self.by_language.setdefault(self.language_code(), {})
+
+    @staticmethod
+    def cache_key(entry):
+        if entry["scope"] == "quest":
+            return "q%d|%s" % (entry["quest_id"], entry["key"])
+        return "t|%s" % entry["key"]
+
+    def dirty(self):
+        self.app.mark_editor_dirty("Translations")
+
+    # ---------------- source
+
+    def refresh_source(self):
+        self.entries = []
+
+        if self.source_kind.get() == self.SOURCE_QUEST:
+            self._pull_quests()
+        else:
+            self._pull_tree()
+
+        self.current_index = None
+        self.refresh_list()
+
+    def _pull_tree(self):
+        tab = self.app.dialogue_tab
+        data = tab.build_output()
+
+        for key, text, where in loc_tree_entries(data):
+            self.entries.append({"scope": "tree", "quest_id": 0,
+                                 "key": key, "text": text, "where": where})
+
+        self.source_path = tab.source_path
+        relative = loc_relative_tree_path(self.app.profile_path.get(),
+                                          tab.output_path())
+        if relative:
+            self.source_note.set(
+                "From the dialogue tree %s (tree ID %s)."
+                % (relative, data.get("ID", "?")))
+        else:
+            self.source_note.set(
+                "From the dialogue tree open in the Dialogue tab (tree ID %s). "
+                "Pick your profile folder so the file can be matched by name "
+                "as well as by ID." % data.get("ID", "?"))
+
+    def _pull_quests(self):
+        tab = self.app.quest_tab
+        data = tab.build_output()
+
+        for quest in data.get("Quests") or []:
+            quest_id = safe_int(quest.get("QuestID", 0), 0)
+            if quest_id <= 0:
+                continue
+            label = self.app.quest_label(quest_id) or ("Quest %d" % quest_id)
+            for key, text, where in loc_quest_entries(quest):
+                self.entries.append(
+                    {"scope": "quest", "quest_id": quest_id, "key": key,
+                     "text": text, "where": "%s  -  %s" % (label, where)})
+
+        self.source_path = None
+        self.source_note.set(
+            "From the quest wording file open in the Quest wording tab (%d "
+            "quest(s))." % len(data.get("Quests") or []))
+
+    # ---------------- list
+
+    def visible_entries(self):
+        store = self.store()
+        if not self.only_missing.get():
+            return list(enumerate(self.entries))
+        return [(index, entry) for index, entry in enumerate(self.entries)
+                if not (store.get(self.cache_key(entry)) or "").strip()]
+
+    def refresh_list(self):
+        for item in self.tree_view.get_children():
+            self.tree_view.delete(item)
+
+        store = self.store()
+        for index, entry in self.visible_entries():
+            translation = store.get(self.cache_key(entry), "")
+            self.tree_view.insert(
+                "", "end", iid=str(index),
+                values=(entry["where"], short_one_line(entry["text"]),
+                        short_one_line(translation)))
+
+        done = 0
+        for entry in self.entries:
+            if (store.get(self.cache_key(entry)) or "").strip():
+                done += 1
+        total = len(self.entries)
+        if total:
+            self.progress.set("%d of %d translated" % (done, total))
+        else:
+            self.progress.set("nothing to translate yet")
+
+        self._show_entry(None)
+
+    def on_row_select(self, _event=None):
+        selection = self.tree_view.selection()
+        if not selection:
+            return
+        self.apply_current(refresh=False)
+        self._show_entry(int(selection[0]))
+
+    def _show_entry(self, index):
+        self.current_index = index
+
+        self.original_box.configure(state="normal")
+        self.original_box.delete("1.0", tk.END)
+        self.translation_box.delete("1.0", tk.END)
+
+        if index is None or index >= len(self.entries):
+            self.original_box.configure(state="disabled")
+            self.translation_box.configure(state="disabled")
+            return
+
+        entry = self.entries[index]
+        self.original_box.insert("1.0", entry["text"])
+        self.original_box.configure(state="disabled")
+        self.translation_box.configure(state="normal")
+        self.translation_box.insert(
+            "1.0", self.store().get(self.cache_key(entry), ""))
+
+    def apply_current(self, refresh=True):
+        if self.current_index is None:
+            return
+        if self.current_index >= len(self.entries):
+            return
+
+        entry = self.entries[self.current_index]
+        text = self.translation_box.get("1.0", tk.END).strip()
+        key = self.cache_key(entry)
+
+        previous = self.store().get(key, "")
+        if text == previous:
+            return
+
+        if text:
+            self.store()[key] = text
+        else:
+            self.store().pop(key, None)
+
+        self.dirty()
+
+        if refresh:
+            keep = self.current_index
+            self.refresh_list()
+            if str(keep) in self.tree_view.get_children():
+                self.tree_view.selection_set(str(keep))
+                self._show_entry(keep)
+        else:
+            values = self.tree_view.item(str(self.current_index), "values")
+            if values:
+                self.tree_view.item(
+                    str(self.current_index),
+                    values=(values[0], values[1], short_one_line(text)))
+
+    def copy_original(self):
+        if self.current_index is None:
+            return
+        self.translation_box.delete("1.0", tk.END)
+        self.translation_box.insert(
+            "1.0", self.entries[self.current_index]["text"])
+        self.apply_current()
+
+    def jump_to_missing(self):
+        self.apply_current(refresh=False)
+        store = self.store()
+        start = 0
+        if self.current_index is not None:
+            start = self.current_index + 1
+        order = list(range(start, len(self.entries))) + list(range(0, start))
+        for index in order:
+            entry = self.entries[index]
+            if (store.get(self.cache_key(entry)) or "").strip():
+                continue
+            if str(index) not in self.tree_view.get_children():
+                self.only_missing.set(False)
+                self.refresh_list()
+            self.tree_view.selection_set(str(index))
+            self.tree_view.see(str(index))
+            self._show_entry(index)
+            return
+        messagebox.showinfo(APP_TITLE, tr("Every line has a translation."))
+
+    def on_language_change(self):
+        self.apply_current(refresh=False)
+        self.current_index = None
+        self.refresh_list()
+
+    # ---------------- disk
+
+    @staticmethod
+    def safe_stub(text):
+        cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(text)).strip("_")
+        return cleaned or "translation"
+
+    def source_file_stub(self):
+        if self.source_kind.get() == self.SOURCE_QUEST:
+            name = self.app.quest_tab.file_name.get().strip() \
+                or "ServerQuests.json"
+            return self.safe_stub("questtext_"
+                                  + os.path.splitext(name)[0].lower())
+
+        relative = loc_relative_tree_path(self.app.profile_path.get(),
+                                          self.app.dialogue_tab.output_path())
+        if relative:
+            return self.safe_stub(os.path.splitext(relative)[0].replace(
+                "/", "_"))
+
+        tree_id = safe_int(self.app.dialogue_tab.tree.get("ID", 1), 1)
+        return "tree_%d" % tree_id
+
+    def output_path(self):
+        root = self.app.profile_path.get() or ""
+        return os.path.join(root, "Localization", self.language_code(),
+                            self.source_file_stub() + ".json")
+
+    def build_output(self):
+        self.apply_current(refresh=False)
+        store = self.store()
+
+        tree_entries = []
+        quest_entries = {}
+
+        for entry in self.entries:
+            text = (store.get(self.cache_key(entry)) or "").strip()
+            if not text:
+                continue
+            record = {"Key": entry["key"], "Text": text}
+            if entry["scope"] == "quest":
+                quest_entries.setdefault(entry["quest_id"], []).append(record)
+            else:
+                tree_entries.append(record)
+
+        out = {
+            "ConfigVersion": LOC_FILE_VERSION,
+            "Language": self.language_code(),
+            "Trees": [],
+            "Quests": [],
+        }
+
+        if tree_entries:
+            out["Trees"].append({
+                "TreeID": safe_int(self.app.dialogue_tab.tree.get("ID", 1), 1),
+                "TreeFile": loc_relative_tree_path(
+                    self.app.profile_path.get(),
+                    self.app.dialogue_tab.output_path()),
+                "Entries": tree_entries,
+            })
+
+        for quest_id in sorted(quest_entries):
+            out["Quests"].append({"QuestID": quest_id,
+                                  "Entries": quest_entries[quest_id]})
+
+        return out
+
+    def load(self, data, path=None):
+        """Pull an existing Localization file into the language it declares."""
+        code = str(data.get("Language", "") or "").lower()
+        if code not in LANGUAGE_LABELS and path:
+            code = os.path.basename(os.path.dirname(path)).lower()
+        if code not in LANGUAGE_LABELS:
+            code = self.language_code()
+
+        store = self.by_language.setdefault(code, {})
+        count = 0
+
+        for block in data.get("Trees") or []:
+            for record in block.get("Entries") or []:
+                key = str(record.get("Key", ""))
+                text = str(record.get("Text", ""))
+                if key and text:
+                    store["t|" + key] = text
+                    count += 1
+
+        for block in data.get("Quests") or []:
+            quest_id = safe_int(block.get("QuestID", 0), 0)
+            for record in block.get("Entries") or []:
+                key = str(record.get("Key", ""))
+                text = str(record.get("Text", ""))
+                if key and text:
+                    store["q%d|%s" % (quest_id, key)] = text
+                    count += 1
+
+        self.language_label.set(LANGUAGE_LABELS[code])
+        self.current_index = None
+        self.refresh_list()
+        return count
+
+    def load_existing(self):
+        path = self.output_path()
+        if not os.path.isfile(path):
+            messagebox.showinfo(
+                APP_TITLE,
+                tr("Nothing saved for this language yet:\n\n%s") % path)
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as error:
+            messagebox.showerror(
+                APP_TITLE, tr("Couldn't read that file:\n\n%s") % error)
+            return
+        count = self.load(data, path)
+        self.app.clear_editor_dirty("Translations")
+        self.app.set_status(tr("Loaded %d translated line(s) from %s")
+                            % (count, path))
+
+    def validate(self):
+        issues = []
+        warnings = []
+
+        if not self.entries:
+            issues.append(
+                "There is nothing to translate - open a dialogue tree or a "
+                "quest wording file first, then press 'Pull latest text'.")
+            return issues, warnings
+
+        store = self.store()
+        missing = 0
+        for entry in self.entries:
+            if not (store.get(self.cache_key(entry)) or "").strip():
+                missing += 1
+
+        if missing:
+            warnings.append(
+                "%d of %d line(s) have no translation yet. Those show the "
+                "original wording in game, which is fine - this is only a "
+                "reminder of what is left."
+                % (missing, len(self.entries)))
+
+        if self.source_kind.get() == self.SOURCE_TREE:
+            if not loc_relative_tree_path(self.app.profile_path.get(),
+                                          self.app.dialogue_tab.output_path()):
+                warnings.append(
+                    "This tree isn't inside your profile's Dialogues folder "
+                    "yet, so the translation can only be matched by tree ID. "
+                    "Save the tree into the profile first if two trees share "
+                    "an ID.")
+
+        return issues, warnings
+
+
 class PreviewScene:
 
     def __init__(self, title, speaker, line, buttons, note=""):
@@ -6100,6 +7540,32 @@ class LivePreviewWindow(tk.Toplevel):
         self.heading.configure(text=scene.title)
         self.note.configure(text=scene.note)
         self.draw(scene)
+
+    #! Kept in step with RESPONSE_GROW_LINES / RESPONSE_MIN_FONT_PX in
+    #! DialogueWindowMenu.c. The preview's pixel scale isn't the game's, so
+    #! the floor is the same fraction of the base rather than the same number.
+    GROW_LINES = 3
+    MIN_OPTION_SIZE = 6
+
+    def option_lines(self, canvas, text, text_width, size):
+        """How many lines this option wraps onto at this size. Measured off a
+        one-line sample rather than assumed, so it holds at any font size."""
+        probe = canvas.create_text(0, -3000, anchor="nw", text=text,
+                                   width=max(30, text_width),
+                                   font=("Segoe UI", size))
+        box = canvas.bbox(probe)
+        canvas.delete(probe)
+
+        sample = canvas.create_text(0, -3000, anchor="nw", text="Ag",
+                                    font=("Segoe UI", size))
+        sample_box = canvas.bbox(sample)
+        canvas.delete(sample)
+
+        if not box or not sample_box:
+            return 1
+
+        line_height = max(1, sample_box[3] - sample_box[1])
+        return max(1, int(round((box[3] - box[1]) / float(line_height))))
 
     def draw(self, scene):
         canvas = self.canvas
@@ -6179,6 +7645,15 @@ class LivePreviewWindow(tk.Toplevel):
 
         show_icons = bool(cfg and cfg.get("ShowResponseIcons"))
 
+        #! Mirrors the mod: an option wraps and the button grows, but only so
+        #! far - past GROW_LINES the text shrinks instead. Getting this wrong
+        #! here is what let a truncated option look fine in the preview.
+        option_size = body_size
+        if cfg and cfg.get("ScaleTextWithPanel"):
+            panel_scale = min(1.8, max(
+                0.6, safe_float(cfg.get("PanelWidth", 0.6), 0.6) / 0.6))
+            option_size = max(6, int(round(body_size * panel_scale)))
+
         row_h = max(20, int(round(24 * scale)))
         vpad = max(3, int(round(4 * scale)))
         gap = 4
@@ -6199,11 +7674,18 @@ class LivePreviewWindow(tk.Toplevel):
             if show_icons:
                 icon_size = max(8, row_h * 0.5)
                 text_width -= icon_size + 10
+
+            size = option_size
+            lines = self.option_lines(canvas, text, text_width, size)
+            while lines > self.GROW_LINES and size > self.MIN_OPTION_SIZE:
+                size -= 1
+                lines = self.option_lines(canvas, text, text_width, size)
+
             txt_id = canvas.create_text(
                 text_x, y + vpad, anchor="nw", text=text, fill=fill_text,
-                width=max(30, text_width), font=("Segoe UI", body_size))
+                width=max(30, text_width), font=("Segoe UI", size))
             text_box = canvas.bbox(txt_id)
-            text_h = (text_box[3] - text_box[1]) if text_box else body_size
+            text_h = (text_box[3] - text_box[1]) if text_box else size
             box_h = max(row_h - 4, text_h + vpad * 2)
             rect = canvas.create_rectangle(
                 left, y, right, y + box_h, fill=option_bg,
@@ -6368,10 +7850,12 @@ class App(tk.Tk):
         self.quest_index = []
         self.npc_index = []
         self.theme_name = "dark"
+        self.ui_language = "english"
         self.dirty_editors = set()
         self.preview_window = None
         self.ready = False
         self.load_settings()
+        load_ui_language(self.ui_language)
 
         self.style = ttk.Style(self)
         try:
@@ -6394,11 +7878,13 @@ class App(tk.Tk):
         self.ai_settings_tab = AISettingsTab(self.notebook, self)
         self.factions_tab = FactionsTab(self.notebook, self)
         self.ai_patrols_tab = AIPatrolsTab(self.notebook, self)
+        self.translations_tab = TranslationsTab(self.notebook, self)
         self.files_tab = ttk.Frame(self.notebook)
         self._build_files_tab(self.files_tab)
 
         self.notebook.add(self.dialogue_tab, text="  Dialogue  ")
         self.notebook.add(self.quest_tab, text="  Quest wording  ")
+        self.notebook.add(self.translations_tab, text="  Translations  ")
         self.notebook.add(self.menu_tab, text="  Menu appearance  ")
         self.notebook.add(self.ai_settings_tab, text="  Global AI settings  ")
         self.notebook.add(self.factions_tab, text="  Factions  ")
@@ -6408,8 +7894,15 @@ class App(tk.Tk):
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.bind_all(sequence, self.on_mouse_wheel)
 
+        self.bind_all("<Control-KeyPress>", self.on_control_key)
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+
+        self.tab_titles = [self.notebook.tab(index, "text")
+                           for index in range(len(self.notebook.tabs()))]
+
         self.dialogue_tab.update_path_preview()
         self.apply_theme()
+        self.apply_language()
         self.scan_quests(announce=False)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.dirty_editors.clear()
@@ -6466,6 +7959,15 @@ class App(tk.Tk):
                                        command=self.toggle_theme)
         self.theme_button.pack(side="right")
 
+        self.ui_language_box = ttk.Combobox(
+            top, state="readonly", width=12,
+            values=[label for _code, label in TRANSLATION_LANGUAGES])
+        self.ui_language_box.set(
+            LANGUAGE_LABELS.get(self.ui_language, "English"))
+        self.ui_language_box.pack(side="right", padx=6)
+        self.ui_language_box.bind("<<ComboboxSelected>>",
+                                  lambda _e: self.on_ui_language_change())
+
         ttk.Button(top, text="Live preview", width=13,
                    command=self.toggle_preview).pack(side="right", padx=6)
 
@@ -6515,6 +8017,18 @@ class App(tk.Tk):
                   wraplength=1200, style="Hint.TLabel").pack(
             anchor="w", padx=10, pady=(1, 4))
 
+    def on_tab_changed(self, _event=None):
+        """Keep the Translations tab in step with whatever is being edited -
+        already-typed translations are kept, they are keyed, not positional."""
+        if not self.ready:
+            return
+        try:
+            widget = self.nametowidget(self.notebook.select())
+        except Exception:
+            return
+        if widget is self.translations_tab:
+            self.translations_tab.refresh_source()
+
     def on_mouse_wheel(self, event):
         widget = self.winfo_containing(event.x_root, event.y_root)
         while widget is not None:
@@ -6530,6 +8044,22 @@ class App(tk.Tk):
                 return "break"
             widget = getattr(widget, "master", None)
         return None
+
+    def on_control_key(self, event):
+        # Ctrl+C/V/X/A by physical key, so copy/paste still work on non-Latin
+        # keyboard layouts where the keysym isn't the Latin letter (Tk's default
+        # bindings only fire on <Control-c> etc. and never trigger there).
+        actions = {67: "<<Copy>>", 86: "<<Paste>>", 88: "<<Cut>>",
+                   65: "<<SelectAll>>"}
+        virtual = actions.get(event.keycode)
+        if not virtual:
+            return None
+        widget = event.widget
+        if not isinstance(widget, (tk.Entry, ttk.Entry, tk.Text,
+                                   ttk.Combobox, tk.Spinbox, ttk.Spinbox)):
+            return None
+        widget.event_generate(virtual)
+        return "break"
 
     def open_url(self, url):
         try:
@@ -6897,6 +8427,82 @@ class App(tk.Tk):
     def skin_window(self, window):
         window.configure(background=self.palette()["bg"])
         self.skin_children(window)
+        self.translate_children(window)
+
+    # ---------------- the editor's own language
+
+    def on_ui_language_change(self):
+        label = self.ui_language_box.get()
+        for code, text in TRANSLATION_LANGUAGES:
+            if text == label:
+                self.ui_language = code
+                break
+        load_ui_language(self.ui_language)
+        self.apply_language()
+        self.save_settings()
+        self.set_status(tr("Interface language set to %s") % label)
+
+    def translate_children(self, widget):
+        """Swap every static label/button caption for its translation. The
+        English original is stashed on first pass so switching language a
+        second time still translates from English, not from itself."""
+        for child in widget.winfo_children():
+            try:
+                original = getattr(child, "_source_text", None)
+                if original is None and "text" in child.keys():
+                    original = child.cget("text")
+                    child._source_text = original
+                if original:
+                    child.configure(text=tr(original))
+            except Exception:
+                pass
+            self.translate_children(child)
+
+    def apply_language(self):
+        self.translate_children(self)
+        for index, title in enumerate(getattr(self, "tab_titles", [])):
+            try:
+                self.notebook.tab(index, text=tr(title))
+            except Exception:
+                pass
+
+    def export_ui_template(self):
+        """Write every interface string this session has shown into the
+        override file, so a translator can fill it in without a rebuild."""
+        path = external_locale_path()
+
+        existing = {}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                existing = json.load(handle)
+        except Exception:
+            pass
+
+        strings = sorted(_UI_STATE["seen"])
+        for code, _label in TRANSLATION_LANGUAGES:
+            if code == "english":
+                continue
+            block = existing.setdefault(code, {})
+            for text in strings:
+                block.setdefault(text, "")
+
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(existing, handle, indent=2, ensure_ascii=False,
+                          sort_keys=True)
+        except Exception as error:
+            messagebox.showerror(
+                APP_TITLE,
+                tr("Couldn't write the template: %s")
+                % error)
+            return
+
+        messagebox.showinfo(
+            APP_TITLE,
+            tr("Interface translation template written to:\n\n%s\n\nFill in "
+               "the blanks for any language and restart DialogueForge - it is "
+               "picked up automatically, no rebuild needed. Visit every tab "
+               "before exporting to catch every string.") % path)
 
     def _build_files_tab(self, parent):
         ttk.Label(parent,
@@ -6912,6 +8518,8 @@ class App(tk.Tk):
                    command=self.create_structure).pack(side="left", padx=6)
         ttk.Button(row, text="Open LoadLog.txt",
                    command=self.open_loadlog).pack(side="left")
+        ttk.Button(row, text="Quest flow report",
+                   command=self.write_quest_flow).pack(side="left", padx=6)
 
         self.file_list = tk.Listbox(parent, exportselection=False)
         self.file_list.pack(fill="both", expand=True, padx=8, pady=8)
@@ -6936,6 +8544,8 @@ class App(tk.Tk):
             self.quest_folder.set(data.get("quest_folder", ""))
             if data.get("theme") in PALETTES:
                 self.theme_name = data["theme"]
+            if data.get("ui_language") in LANGUAGE_LABELS:
+                self.ui_language = data["ui_language"]
         except Exception:
             pass
 
@@ -6944,7 +8554,8 @@ class App(tk.Tk):
             with open(SETTINGS_FILE, "w", encoding="utf-8") as handle:
                 json.dump({"profile_path": self.profile_path.get(),
                            "quest_folder": self.quest_folder.get(),
-                           "theme": self.theme_name}, handle)
+                           "theme": self.theme_name,
+                           "ui_language": self.ui_language}, handle)
         except Exception:
             pass
 
@@ -6973,7 +8584,8 @@ class App(tk.Tk):
                  id(self.menu_tab): "Menu appearance",
                  id(self.ai_settings_tab): "Global AI settings",
                  id(self.factions_tab): "Factions",
-                 id(self.ai_patrols_tab): "AI patrols"}
+                 id(self.ai_patrols_tab): "AI patrols",
+                 id(self.translations_tab): "Translations"}
         return names.get(id(editor), "")
 
     def custom_faction_names(self):
@@ -7185,7 +8797,7 @@ class App(tk.Tk):
             messagebox.showinfo(APP_TITLE, "Pick a profile folder first.")
             return
         for folder in ["Dialogues", os.path.join("Dialogues", "Shared"),
-                       "QuestText"]:
+                       "QuestText", "Localization"]:
             target = os.path.join(root, folder)
             if not os.path.isdir(target):
                 os.makedirs(target)
@@ -7204,7 +8816,8 @@ class App(tk.Tk):
             path = os.path.join(root, top)
             if os.path.isfile(path):
                 candidates.append(path)
-        for sub in ["Dialogues", "QuestText", "AIPatrol", "Factions"]:
+        for sub in ["Dialogues", "QuestText", "AIPatrol", "Factions",
+                    "Localization"]:
             base = os.path.join(root, sub)
             for current, _dirs, files in os.walk(base):
                 for name in sorted(files):
@@ -7216,6 +8829,84 @@ class App(tk.Tk):
         if not candidates:
             self.file_list.insert(tk.END, "(no config files found yet)")
         self._scan_reputations()
+
+    def write_quest_flow(self):
+        """Writes a plain-text map of every quest lock across every
+        conversation, so an owner can look it up instead of remembering it."""
+        root = self.profile_path.get()
+        if not root or not os.path.isdir(root):
+            messagebox.showinfo(APP_TITLE, "Pick a profile folder first.")
+            return
+
+        known = set(q.get("id") for q in self.quest_index
+                    if isinstance(q.get("id"), int))
+
+        rows = []
+        problems = []
+        scanned = 0
+
+        base = os.path.join(root, "Dialogues")
+        for current, _dirs, files in os.walk(base):
+            for name in sorted(files):
+                if not name.lower().endswith(".json"):
+                    continue
+                path = os.path.join(current, name)
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        data = json.load(handle)
+                except Exception as error:
+                    problems.append("%s won't parse as JSON: %s"
+                                    % (os.path.relpath(path, root), error))
+                    continue
+                if not isinstance(data, dict) or "Nodes" not in data:
+                    continue
+
+                rel = os.path.relpath(path, root)
+                scanned += 1
+                rows.extend(quest_flow_rows(data, rel))
+                problems.extend(quest_flow_problems(data, rel, known))
+
+        if not scanned:
+            messagebox.showinfo(
+                APP_TITLE,
+                "No conversations found under the Dialogues folder.")
+            return
+
+        report = build_quest_flow_report(
+            rows, problems,
+            self.quest_title_only)
+
+        out_path = os.path.join(root, "QuestFlow.txt")
+        try:
+            with open(out_path, "w", encoding="utf-8") as handle:
+                handle.write(report)
+        except Exception as error:
+            messagebox.showerror(
+                APP_TITLE,
+                "Couldn't write the report: %s" % error)
+            return
+
+        self.scan_files()
+        self.set_status("Quest flow report written to %s" % out_path)
+        self.show_text_window("QuestFlow.txt", report)
+
+    def quest_title_only(self, quest_id):
+        """Just the name. quest_label() prefixes the id, which reads badly
+        under a heading that already says the id."""
+        entry = self.quest_lookup(quest_id)
+        if entry and entry.get("title"):
+            return entry["title"]
+        return "name unknown - not in your quest folder"
+
+    def show_text_window(self, title, content):
+        window = tk.Toplevel(self)
+        window.title(title)
+        window.geometry("900x600")
+        text = tk.Text(window, wrap="none")
+        text.pack(fill="both", expand=True)
+        text.insert("1.0", content)
+        text.configure(state="disabled")
+        self.skin_window(window)
 
     def open_loadlog(self):
         path = os.path.join(self.profile_path.get(), "Dialogues",
@@ -7262,7 +8953,13 @@ class App(tk.Tk):
             return
 
         name = os.path.basename(path).lower()
-        if "Factions" in data or name == "factions.json":
+        if looks_like_localization(data):
+            count = self.translations_tab.load(data, path)
+            self.notebook.select(self.translations_tab)
+            self.clear_editor_dirty("Translations")
+            self.set_status("Loaded %d translated line(s) from %s"
+                            % (count, path))
+        elif "Factions" in data or name == "factions.json":
             self.factions_tab.load(data)
             self.notebook.select(self.factions_tab)
             self.clear_editor_dirty("Factions")
@@ -7305,7 +9002,7 @@ class App(tk.Tk):
         widget = self.nametowidget(current)
         if widget in (self.dialogue_tab, self.quest_tab, self.menu_tab,
                       self.ai_settings_tab, self.factions_tab,
-                      self.ai_patrols_tab):
+                      self.ai_patrols_tab, self.translations_tab):
             return widget
         return None
 
@@ -7461,7 +9158,15 @@ class App(tk.Tk):
         npc_claims = {}
         trader_claims = {}
         quest_claims = {}
-        counts = {"dialogue": 0, "quest": 0, "menu": 0, "unknown": 0}
+        counts = {"dialogue": 0, "quest": 0, "menu": 0, "localization": 0,
+                  "unknown": 0}
+
+        #! Collected on the way past so translations can be checked against
+        #! the trees they claim to translate, once every file has been read.
+        loc_files = []
+        tree_keys_by_file = {}
+        tree_keys_by_id = {}
+        quest_keys_by_id = {}
 
         for path in self.found_files:
             rel = os.path.relpath(path, root)
@@ -7476,13 +9181,31 @@ class App(tk.Tk):
                 continue
 
             name = os.path.basename(path).lower()
+            if looks_like_localization(data):
+                #! Checked after the loop - the trees it refers to may not
+                #! have been read yet.
+                counts["localization"] += 1
+                loc_files.append((rel, path, data))
+                continue
             if "Nodes" in data:
                 counts["dialogue"] += 1
+                keys = set(key for key, _text, _where in loc_tree_entries(data))
+                loc_key = loc_relative_tree_path(root, path)
+                if loc_key:
+                    tree_keys_by_file[loc_key] = keys
+                tree_id = safe_int(data.get("ID", 0), 0)
+                if tree_id > 0:
+                    tree_keys_by_id.setdefault(tree_id, set()).update(keys)
                 kind, key = kind_and_key_from_path(path)
                 if safe_int(data.get("AIPatrolID", 0), 0) > 0:
                     kind = "AI"
                 issues, warnings = validate_tree_dict(
                     data, kind, key, self.quest_index)
+                #! Same checks the quest flow report runs, so a broken quest
+                #! lock shows up here too rather than only in the report.
+                known_ids = set(q.get("id") for q in self.quest_index
+                                if isinstance(q.get("id"), int))
+                issues.extend(quest_flow_problems(data, rel, known_ids))
                 if kind == "NPC":
                     npc_claims.setdefault(safe_int(key, 0), []).append(rel)
                 elif kind == "SHARED":
@@ -7496,6 +9219,10 @@ class App(tk.Tk):
                 for quest in (data.get("Quests") or []):
                     quest_claims.setdefault(
                         quest.get("QuestID"), []).append(rel)
+                    quest_id = safe_int(quest.get("QuestID", 0), 0)
+                    if quest_id > 0:
+                        quest_keys_by_id.setdefault(quest_id, set()).update(
+                            key for key, _t, _w in loc_quest_entries(quest))
             elif "Position" in data or name == "menuconfig.json":
                 counts["menu"] += 1
                 issues, warnings = validate_menu_dict(data)
@@ -7532,6 +9259,9 @@ class App(tk.Tk):
                     "Patrols, Factions or AI settings."]
             results.append((rel, issues, warnings))
 
+        results.extend(self.check_localization_files(
+            loc_files, tree_keys_by_file, tree_keys_by_id, quest_keys_by_id))
+
         cross_issues = []
         cross_warnings = []
         for npc_id, files in sorted(npc_claims.items()):
@@ -7564,6 +9294,99 @@ class App(tk.Tk):
 
         self.show_sweep_report(root, results, cross_issues,
                                cross_warnings, counts)
+
+    def check_localization_files(self, loc_files, tree_keys_by_file,
+                                 tree_keys_by_id, quest_keys_by_id):
+        """Translations point at a line by position, so editing a tree after
+        translating it can leave an overlay aimed at the wrong line - or at a
+        line that no longer exists. Nothing errors in game when that happens,
+        the text just quietly comes out wrong, so it gets caught here."""
+        results = []
+
+        for rel, path, data in loc_files:
+            issues = []
+            warnings = []
+
+            language = str(data.get("Language", "") or "").lower()
+            folder = os.path.basename(os.path.dirname(path)).lower()
+            if folder not in LANGUAGE_LABELS:
+                issues.append(
+                    "'%s' isn't a language the mod reads, so nothing in this "
+                    "file is used. The folder must be one of: %s."
+                    % (folder, ", ".join(LANGUAGE_CODES)))
+            elif language and language != folder:
+                warnings.append(
+                    "Says Language '%s' but sits in the '%s' folder. The "
+                    "folder wins - players get %s."
+                    % (language, folder, folder))
+
+            for block in (data.get("Trees") or []):
+                tree_file = str(block.get("TreeFile", "") or "").lower()
+                tree_id = safe_int(block.get("TreeID", 0), 0)
+
+                known = None
+                matched_by = ""
+                if tree_file and tree_file in tree_keys_by_file:
+                    known = tree_keys_by_file[tree_file]
+                    matched_by = tree_file
+                elif tree_id > 0 and tree_id in tree_keys_by_id:
+                    known = tree_keys_by_id[tree_id]
+                    matched_by = "tree ID %d" % tree_id
+                    if tree_file:
+                        warnings.append(
+                            "No tree at '%s' any more - falling back to "
+                            "matching on tree ID %d. Re-save this translation "
+                            "from the Translations tab if you moved or "
+                            "renamed the conversation."
+                            % (tree_file, tree_id))
+
+                if known is None:
+                    issues.append(
+                        "Nothing this translates to. No tree at '%s' and no "
+                        "tree with ID %d - these lines never reach a player."
+                        % (tree_file or "(no TreeFile)", tree_id))
+                    continue
+
+                self._report_stale_keys(block, known, matched_by, issues,
+                                        warnings)
+
+            for block in (data.get("Quests") or []):
+                quest_id = safe_int(block.get("QuestID", 0), 0)
+                known = quest_keys_by_id.get(quest_id)
+                if known is None:
+                    issues.append(
+                        "Translates quest %d, but no QuestText file has "
+                        "wording for that quest - these lines never reach a "
+                        "player." % quest_id)
+                    continue
+                self._report_stale_keys(block, known, "quest %d" % quest_id,
+                                        issues, warnings)
+
+            results.append((rel, issues, warnings))
+
+        return results
+
+    @staticmethod
+    def _report_stale_keys(block, known, matched_by, issues, warnings):
+        entries = block.get("Entries") or []
+        stale = [str(record.get("Key", "")) for record in entries
+                 if str(record.get("Key", "")) not in known]
+
+        if stale:
+            issues.append(
+                "%d translated line(s) point at text that isn't in %s any "
+                "more (%s%s). That usually means the conversation was edited "
+                "after it was translated - open the tree, go to the "
+                "Translations tab and save it again."
+                % (len(stale), matched_by, ", ".join(sorted(stale)[:4]),
+                   ", ..." if len(stale) > 4 else ""))
+
+        done = len(entries) - len(stale)
+        if known and done < len(known):
+            warnings.append(
+                "%d of %d line(s) translated in %s - the rest show the "
+                "original wording, which is fine if that's what you want."
+                % (done, len(known), matched_by))
 
     def show_sweep_report(self, root, results, cross_issues,
                           cross_warnings, counts):

@@ -1,10 +1,10 @@
-# Windows version resource for DialogueForge.exe
+﻿# Windows version resource for DialogueForge.exe
 # An exe with no metadata looks anonymous to antivirus heuristics and to
 # users checking Properties. Filling this in costs nothing and helps both.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 2, 0, 0),
-    prodvers=(1, 2, 0, 0),
+    filevers=(1, 3, 0, 0),
+    prodvers=(1, 3, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -19,12 +19,12 @@ VSVersionInfo(
         [StringStruct('CompanyName', 'ABTT ESK'),
          StringStruct('FileDescription',
                       'DialogueForge - config editor for the DayZ Dialogue Framework'),
-         StringStruct('FileVersion', '1.2.0.0'),
+         StringStruct('FileVersion', '1.3.0.0'),
          StringStruct('InternalName', 'DialogueForge'),
          StringStruct('LegalCopyright', 'ABTT ESK'),
          StringStruct('OriginalFilename', 'DialogueForge.exe'),
          StringStruct('ProductName', 'DialogueForge'),
-         StringStruct('ProductVersion', '1.2.0.0')])
+         StringStruct('ProductVersion', '1.3.0.0')])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]

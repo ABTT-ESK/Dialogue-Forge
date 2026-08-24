@@ -103,11 +103,15 @@ Each button needs two things — its text, and what it does:
 | **SHOW_QUEST_LIST** | Open this NPC's quest list. |
 | **END_CONVERSATION** | Say goodbye and close. |
 | **OPEN_TRADER** | Close and open the shop. Traders only. |
+| **OFFER_QUEST** | Open one quest's offer screen, so the player can read it and accept or decline. Pick the quest in "Quest to use". |
 
 "Next node" only applies to **NONE** — it greys itself out otherwise.
 
-**Only after quest** hides a button until the player has *completed* that
-quest. Use **Browse quests...** to pick by name.
+**Quest lock** hides a button until the player has *completed* that quest.
+**Hide after** does the opposite — the button disappears once that quest is
+completed, so a line can retire itself instead of hanging around forever. Use
+both on one button and it appears after the first quest and goes away after
+the second. **Browse quests...** picks by name for either.
 
 Renaming a node ID automatically repoints everything that led to it, so you
 can renumber without breaking anything.
@@ -125,6 +129,13 @@ character for you.
 ---
 
 ## Quest wording
+
+> The headings on this tab are the mod's official screen names. There are
+> eleven screens in all and each is named after the field that controls its
+> wording, so `TurnInTexts` belongs to the **quest turn-in screen**. The full
+> list is in the mod's `docs/SCREENS.md` -- worth a look before asking for
+> help, so you can name the screen you mean.
+
 
 Every field is labelled **(NPC says)** or **(Player says)**. NPC lines are
 spoken above the buttons and one is picked at random; player lines each become
@@ -181,6 +192,20 @@ can never strand them.
 ---
 
 ## Menu appearance
+
+**Let players pick their language** adds a Language option to the conversation
+window. It's on by default and costs you nothing on a single-language server —
+it only ever shows up if `Localization\` actually has translations in it.
+
+**Option text scales with panel size** ties response text to how wide you've
+made the menu, so a big menu gets big text and a compact one shrinks to fit
+rather than cutting anything off. It's **off by default** — turning it on is
+the only way your existing menu's text size changes.
+
+Long options wrap and the button grows to fit, up to three lines; past that the
+text shrinks instead. You don't have to count characters — write the option and
+the preview shows you what it will look like.
+
 
 How the dialogue window looks.
 
@@ -288,10 +313,96 @@ The detail panel is grouped:
   always forgives; *After a set number* makes it permanent after that many bad
   runs. **Remembered by** overrides the faction/patrol/both choice the same way.
 
+## Translations
+
+For running your dialogue in more than one language.
+
+**How players get a language:** whatever DayZ is set to on their machine. If
+you have a folder for it they read your translation, and if you don't they
+read your original wording. They don't press anything, and you don't set
+anything up per player.
+
+You only need this tab if you want **one server serving several languages**.
+If your whole server is in one language — English or otherwise — just write
+your conversations in that language and ignore this tab entirely.
+
+The mod's own wording (`Reward:`, `Confirm`, `Cancel`) is already translated
+into all 14 languages and needs nothing from you either way.
+
+**Your conversation files are never touched.** A translation is a separate
+overlay listing only the lines you've translated, saved to
+`Localization\<language>\` in your profile folder.
+
+How it goes:
+
+1. Open the conversation you want to translate on the **Dialogue** tab (or the
+   file you want on the **Quest wording** tab).
+2. Come to **Translations**. Every line in it is listed — what the character
+   says, every button, every alternate line, every story tree.
+3. Pick the language at the top left.
+4. Click a line, type the translation on the right, **Apply**.
+5. **Save** (the button along the top), same as any other tab.
+
+Along the way:
+
+- The counter at the top right says how many are done.
+- **Only show lines still missing** hides everything you've already done, and
+  **Next one missing** jumps straight to the next gap.
+- **Copy the original across** fills the box with the original, handy when a
+  line is a name or a number that shouldn't change.
+- **Load what's on disk** pulls back a translation you saved earlier.
+- Switching language keeps what you've typed for the one you were on, so you
+  can work on two at once.
+
+**You don't have to finish.** Any line you leave blank shows your original
+wording in game — a half-translated language is safe to put on a live server.
+Same for a language you never make a folder for: those players just see the
+original.
+
+Two things worth knowing:
+
+- Save your conversation into your profile folder before translating it. A tree
+  that isn't there yet can only be matched by its ID, which goes wrong if two
+  conversations share one. The tab warns you when you check it.
+- If you reorder or delete responses in a conversation, come back to this tab
+  and save the translation again. The tab itself re-reads the conversation each
+  time you open it and lines everything back up — but the file already on disk
+  doesn't update itself, and a translation pointing at a line that moved will
+  show the wrong text in game.
+
+**Check ALL config files catches that for you.** Run it after any round of
+editing and it reports every translation pointing at text that isn't there any
+more, plus how many lines of each conversation are done. That's the one thing
+worth doing before you push translations to a live server.
+
+### The editor's own language
+
+The dropdown next to Dark mode switches DialogueForge itself. Tabs, the toolbar
+and this tab are translated; anything not translated yet stays English.
+
+**Export interface template...** (bottom of this tab) writes
+`DialogueForge_locales.json` next to DialogueForge.exe with every piece of
+interface text it has shown you. Fill in the blanks for a language, restart, and
+it's picked up — no rebuilding, no Python. Click through every tab first so
+nothing gets missed.
+
+---
+
 ## Server files
 
 Everything found in your profile folder. Double-click any file to open it in
 the right editor.
+
+**Quest flow report** writes `QuestFlow.txt` into your profile folder and
+shows it to you: every quest your conversations mention, listed both by quest
+and by conversation, with each option's own wording beside it. It's there so
+you can look up "what shows after quest 102?" rather than keeping it in your
+head.
+
+It also names three things you can't spot in game: an option that shows and
+hides on the same quest (so it can never appear), an `OFFER_QUEST` with no
+quest picked, and any quest id that isn't in your quest folder. Regenerate it
+whenever you change a quest lock.
 
 **Create folder structure** makes the folders for you if you're starting
 fresh. **Open LoadLog.txt** shows what the mod made of your files last time
@@ -310,6 +421,7 @@ the server started — the first place to look when something didn't work.
 | **Check this tab** | Checks what you're working on. |
 | **Check ALL config files** | Checks everything in your folder. |
 | **Dark / Light mode** | Switches the look of the program. |
+| **Language dropdown** | Switches the program's own interface language. Remembered next time. |
 
 ### Copying a conversation to another NPC
 
