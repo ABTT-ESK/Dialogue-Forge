@@ -51,6 +51,13 @@ over the same NPC.
 Point it at your Expansion quests folder once and every quest field becomes a
 dropdown of real names. No more digging through files for an ID number.
 
+**Builds a trader who runs a whole quest**
+
+Point a single button at one quest — offer it, hand it straight over, or take
+it back once it's done. Traders can't show a quest list, so this is how you
+give one quests: one button per quest, and the editor only offers the actions
+that can actually work for whoever you're editing.
+
 **Translates your dialogue**
 
 Pick a language, work down a list of every line in the conversation, type the

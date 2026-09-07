@@ -12,7 +12,7 @@ try:
 except Exception:
     SpellChecker = None
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 APP_TITLE = "DialogueForge - DayZ Dialogue Framework config editor"
 SETTINGS_FILE = os.path.join(
     os.path.expanduser("~"), ".dialogueforge_settings.json")
@@ -45,10 +45,48 @@ ACTION_HELP = {
     "GO_HOSTILE": "AI trees only. The AI's whole patrol turns hostile and attacks the player, then the window closes. For conversations that can go sideways.",
     "ACCEPT_QUEST": "Hands the player a quest immediately, with no offer screen. Pick it in 'Quest to use'. Left empty, it only works inside the live quest-detail step.",
     "DECLINE_QUEST": "Advanced - only meaningful inside the live quest-detail step.",
-    "TURN_IN_QUEST": "Advanced - only meaningful inside the live quest-detail step.",
+    "TURN_IN_QUEST": "Hands in a finished quest and opens its reward picker. Pick it in 'Quest to use' to allow the hand-in from any character, a trader included. Left empty, it only works inside the live quest-detail step.",
 }
 
 NODE_TYPES = ["STANDARD", "QUEST_LIST", "QUEST_DETAIL"]
+
+# The game's JSON reader stops at 1023 bytes per line (a 1024 buffer minus its
+# terminator). Measured in game, not guessed: lines authored at 1223, 1711,
+# 2008 and 2269 bytes all arrived as exactly 1023.
+#
+# It is a BYTE limit, so it is not 1023 letters. A plain English letter is one
+# byte, a Russian one is two, a Chinese one is three - about 1000 English
+# characters, 500 Russian, or 340 Chinese. The mod cannot warn about this
+# itself (by the time it reads the file the text is already cut), so the
+# editor is the only place that can catch it before players do.
+LINE_BYTES_LIMIT = 1023
+LINE_BYTES_CLOSE = 900
+TRANSLATION_RISK_CHARS = LINE_BYTES_LIMIT // 2
+
+
+def line_length_warning(text, where):
+    """Flag a line the game will cut, or one a translation would push over."""
+    raw = text or ""
+    if not raw.strip():
+        return None
+    nbytes = len(raw.encode("utf-8"))
+    nchars = len(raw)
+    if nbytes >= LINE_BYTES_LIMIT:
+        return ("%s is %d bytes (%d characters). The game only reads %d bytes "
+                "of a line, so this WILL be cut off - shorten it or split it "
+                "across several nodes."
+                % (where, nbytes, nchars, LINE_BYTES_LIMIT))
+    if nbytes >= LINE_BYTES_CLOSE:
+        return ("%s is %d bytes (%d characters), close to the %d-byte limit "
+                "the game reads. A little more and it will be cut off."
+                % (where, nbytes, nchars, LINE_BYTES_LIMIT))
+    if nchars >= TRANSLATION_RISK_CHARS:
+        return ("%s is %d characters. That fits in English, but a Russian "
+                "translation would take about twice the room and be cut off "
+                "at the game's %d-byte limit."
+                % (where, nchars, LINE_BYTES_LIMIT))
+    return None
+
 
 NOT_LOCKED_LABEL = "Not locked"
 
@@ -1056,7 +1094,12 @@ def quest_flow_rows(data, rel_path):
                 if hidden > 0:
                     rows.append((hidden, "hidden after", rel_path, where, text))
                 if used > 0:
-                    verb = "offered by" if action == "OFFER_QUEST"                         else "handed over by"
+                    if action == "OFFER_QUEST":
+                        verb = "offered by"
+                    elif action == "TURN_IN_QUEST":
+                        verb = "turned in at"
+                    else:
+                        verb = "handed over by"
                     rows.append((used, verb, rel_path, where, text))
 
             for index, line in enumerate(node.get("SpeakerLines") or []):
@@ -1153,8 +1196,8 @@ def build_quest_flow_report(rows, problems, quest_namer):
     for quest_id in sorted(set(r[0] for r in rows)):
         out.append("")
         out.append("  Quest %d  %s" % (quest_id, quest_namer(quest_id)))
-        for verb in ("offered by", "handed over by", "shown after",
-                     "hidden after", "takes over after",
+        for verb in ("offered by", "handed over by", "turned in at",
+                     "shown after", "hidden after", "takes over after",
                      "unlocks story tree"):
             for row in [r for r in rows if r[0] == quest_id and r[1] == verb]:
                 line = "      %-18s %s  %s" % (verb, row[2], row[3])
@@ -2403,10 +2446,27 @@ def validate_tree_dict(data, kind, key, quest_index=None):
             issues.append(
                 "%s has every option gated behind a quest. Players who "
                 "haven't finished them get a line with no buttons." % label)
+        long_line = line_length_warning(node.get("SpeakerText"),
+                                        "%s's line" % label)
+        if long_line:
+            warnings.append(long_line)
+
+        for alt_index, alt in enumerate(node.get("SpeakerLines") or []):
+            if not isinstance(alt, dict):
+                continue
+            long_alt = line_length_warning(
+                alt.get("Text"), "%s alternate line %d" % (label, alt_index + 1))
+            if long_alt:
+                warnings.append(long_alt)
+
         for response in responses:
             if not (response.get("Text") or "").strip():
                 warnings.append("%s has an option with no button text."
                                 % label)
+            long_option = line_length_warning(
+                response.get("Text"), "%s's option text" % label)
+            if long_option:
+                warnings.append(long_option)
             action = response.get("ActionType", "NONE")
             if action == "NONE":
                 target = response.get("NextNodeID", -1)
@@ -2418,11 +2478,36 @@ def validate_tree_dict(data, kind, key, quest_index=None):
                 warnings.append(
                     "%s uses OPEN_TRADER but this isn't a trader tree."
                     % label)
-            if action in ADVANCED_ACTION_TYPES:
+            if action == "SHOW_QUEST_LIST" and kind not in ("NPC", "SHARED"):
+                kind_label = {"AI": "an AI",
+                              "TRADER": "a trader"}.get(kind, "a " + kind.lower())
                 warnings.append(
-                    "%s uses %s, which only works inside the live "
-                    "quest-detail step the mod builds itself."
-                    % (label, action))
+                    "%s uses SHOW_QUEST_LIST but this is %s tree - it has no "
+                    "quest-giver ID, so the mod would try to show every quest "
+                    "on the server. Give quests with OFFER_QUEST (one option "
+                    "per quest) instead." % (label, kind_label))
+            if action in ("RECRUIT_AI", "GO_HOSTILE") and kind != "AI":
+                warnings.append(
+                    "%s uses %s but this isn't an AI tree." % (label, action))
+            action_quest = response.get("QuestID", -1)
+            if action_quest is None:
+                action_quest = -1
+            if action in ("ACCEPT_QUEST", "TURN_IN_QUEST"):
+                if action_quest <= 0:
+                    warnings.append(
+                        "%s uses %s but names no quest, so it only works "
+                        "inside the live quest-detail step the mod builds "
+                        "itself. Pick one in 'Quest to use' to make it work "
+                        "anywhere." % (label, action))
+                elif quest_index and not any(
+                        q["id"] == action_quest for q in quest_index):
+                    warnings.append(
+                        "%s hands over quest %d, which isn't in your quest "
+                        "folder." % (label, action_quest))
+            elif action == "DECLINE_QUEST":
+                warnings.append(
+                    "%s uses DECLINE_QUEST, which only works inside the live "
+                    "quest-detail step the mod builds itself." % label)
             gate = response.get("RequiredQuestID", -1)
             if gate is None:
                 gate = -1
@@ -3192,9 +3277,11 @@ class DialogueTab(ttk.Frame):
         self.speaker_text = tk.Text(node_box, height=4, wrap="word",
                                     undo=True, autoseparators=True,
                                     maxundo=-1)
-        self.speaker_text.pack(fill="x", padx=6, pady=(2, 6))
+        self.speaker_text.pack(fill="x", padx=6, pady=(2, 0))
         self.speaker_text.bind("<KeyRelease>", lambda _e: self.commit_speaker())
         attach_text_spellcheck(self.speaker_text)
+        self.speaker_len = ttk.Label(node_box, text="", foreground="#888888")
+        self.speaker_len.pack(anchor="w", padx=6, pady=(0, 6))
 
         voice_section = CollapsibleSection(
             node_box, "Voice lines for this node  (optional)")
@@ -3918,6 +4005,7 @@ class DialogueTab(ttk.Frame):
         self.speaker_text.delete("1.0", tk.END)
         self.speaker_text.insert("1.0", self.current_node.get(
             "SpeakerText", ""))
+        self.update_speaker_length()
         self.node_voice.set_items(self.current_node.get("VoiceLineIDs"))
         self.speaker_lines.set_lines(self.current_node.get("SpeakerLines"))
         self.loading = False
@@ -4036,7 +4124,40 @@ class DialogueTab(ttk.Frame):
         self.refresh_outline(reload_editors=False)
         self.mark_dirty()
 
+    def update_speaker_length(self):
+        """Characters and bytes, because the engine counts the second."""
+        if not hasattr(self, "speaker_len"):
+            return
+        raw = self.speaker_text.get("1.0", "end-1c")
+        nchars = len(raw)
+        nbytes = len(raw.encode("utf-8"))
+        if not raw.strip():
+            self.speaker_len.configure(text="", foreground="#888888")
+        elif nbytes >= LINE_BYTES_LIMIT:
+            self.speaker_len.configure(
+                text="%d bytes of %d - THIS WILL BE CUT OFF in game. "
+                     "Shorten it or split it across nodes."
+                     % (nbytes, LINE_BYTES_LIMIT),
+                foreground="#c0392b")
+        elif nbytes >= LINE_BYTES_CLOSE:
+            self.speaker_len.configure(
+                text="%d bytes of %d - close to the limit the game reads."
+                     % (nbytes, LINE_BYTES_LIMIT),
+                foreground="#b9770e")
+        elif nchars >= TRANSLATION_RISK_CHARS:
+            self.speaker_len.configure(
+                text="%d bytes of %d - fits in English, but a Russian "
+                     "translation would be cut off."
+                     % (nbytes, LINE_BYTES_LIMIT),
+                foreground="#b9770e")
+        else:
+            self.speaker_len.configure(
+                text="%d characters, %d bytes of %d"
+                     % (nchars, nbytes, LINE_BYTES_LIMIT),
+                foreground="#888888")
+
     def commit_speaker(self):
+        self.update_speaker_length()
         if self.loading or not self.current_node:
             return
         self.current_node["SpeakerText"] = \
@@ -4053,12 +4174,16 @@ class DialogueTab(ttk.Frame):
 
 
     def refresh_action_values(self):
-        if self.target_kind.get() == "AI":
-            self.action_type["values"] = [
-                "NONE", "END_CONVERSATION", "RECRUIT_AI", "GO_HOSTILE"]
-            return
-        values = [a for a in ACTION_TYPES
-                  if a not in ("RECRUIT_AI", "GO_HOSTILE")]
+        # Only the actions that can work for this target type. The advanced
+        # quest actions name their quest by ID, so they stay on every type.
+        kind = self.target_kind.get()
+        if kind == "TRADER":
+            invalid = {"SHOW_QUEST_LIST", "RECRUIT_AI", "GO_HOSTILE"}
+        elif kind == "AI":
+            invalid = {"SHOW_QUEST_LIST", "OPEN_TRADER"}
+        else:  # NPC / SHARED -- quest givers
+            invalid = {"OPEN_TRADER", "RECRUIT_AI", "GO_HOSTILE"}
+        values = [a for a in ACTION_TYPES if a not in invalid]
         if self.show_advanced.get():
             values += ADVANCED_ACTION_TYPES
         self.action_type["values"] = values
@@ -4263,6 +4388,16 @@ class DialogueTab(ttk.Frame):
                 self.action_quest_note.configure(
                     text="Hands “%s” straight over, with no offer "
                          "screen." % quest_text)
+        elif action == "TURN_IN_QUEST":
+            if blank:
+                self.action_quest_note.configure(
+                    text="No quest picked, so this only works inside the "
+                         "live quest-detail step the mod builds itself.")
+            else:
+                self.action_quest_note.configure(
+                    text="Hands “%s” in, if the player has finished "
+                         "it. Works on any character, a trader included."
+                         % quest_text)
         else:
             self.action_quest_note.configure(text="")
 
@@ -4280,7 +4415,8 @@ class DialogueTab(ttk.Frame):
         self.gate_quest.configure(state="normal")
         self.hide_quest.configure(state="normal")
 
-        uses_quest = action in ("OFFER_QUEST", "ACCEPT_QUEST")
+        uses_quest = action in ("OFFER_QUEST", "ACCEPT_QUEST",
+                                "TURN_IN_QUEST")
         self.action_quest.configure(state="normal" if uses_quest else "disabled")
         if not uses_quest:
             self.action_quest.set(NO_ACTION_QUEST_LABEL)

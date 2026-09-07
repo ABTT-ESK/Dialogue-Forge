@@ -131,6 +131,29 @@ with no `QuestID`, and any quest id with no matching config. The mod's
 `DialogueManager` runs the equivalent checks into `LoadLog.txt`, so a server
 owner who never opens the editor still gets told.
 
+The report tells the three by-id quest actions apart by verb — `OFFER_QUEST`
+is "offered by", `TURN_IN_QUEST` is "turned in at", `ACCEPT_QUEST` is "handed
+over by". **The verb tuple in `build_quest_flow_report` sets the print order**,
+so a verb added in `quest_flow_rows` and not listed there is silently dropped
+from the by-quest section.
+
+## What the action dropdown offers
+
+`refresh_action_values` filters `ACTION_TYPES` by the tree's target kind, so
+an action that cannot work is never offered: no `SHOW_QUEST_LIST` on a
+trader or AI (neither has a quest-giver ID — the mod would have nothing to
+build a list from), no `OPEN_TRADER` off a trader, no `RECRUIT_AI` /
+`GO_HOSTILE` off an AI. `ADVANCED_ACTION_TYPES` is appended **after** that
+filter and is deliberately unfiltered: `ACCEPT_QUEST` and `TURN_IN_QUEST`
+name their quest by id and work on every target kind, which is the only way
+to give a trader quests.
+
+`update_action_state` decides whether the "Quest to use" box is live —
+`OFFER_QUEST`, `ACCEPT_QUEST` and `TURN_IN_QUEST`. **Leaving an action out of
+that tuple greys the box out and `commit_response` then writes `QuestID: -1`**,
+which is how a working mod feature can end up unauthorable. Keep it in step
+with the mod's `DialogueWindowMenu.PerformAction`.
+
 ## Tk gotchas
 
 - **Mouse wheel goes to the focused widget, not the one under the pointer.**

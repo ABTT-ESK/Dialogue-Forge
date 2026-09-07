@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.4.0
+
+### Added
+- **"Quest to use" now works for TURN_IN_QUEST**, alongside OFFER_QUEST and
+  ACCEPT_QUEST. Pick the quest and that button hands it in from any character
+  — which is how you give a **trader** a quest to take back. The note under
+  the box tells you what the button will do either way.
+- **The action dropdown only offers what can actually work** for the kind of
+  character you're editing. A trader is no longer offered SHOW_QUEST_LIST (it
+  has no quest list to show), a quest NPC is no longer offered OPEN_TRADER,
+  and RECRUIT_AI / GO_HOSTILE stay on AI. The advanced quest actions stay
+  available everywhere, because they name their quest by ID.
+- **Two new warnings** in "Check ALL config files":
+  - a button using SHOW_QUEST_LIST on a trader or AI tree, which would have
+    tried to list every quest on the server;
+  - RECRUIT_AI or GO_HOSTILE outside an AI tree.
+
+### Added
+- **A live byte counter under "What the NPC says here."** The game reads at
+  most **1023 bytes** of any one line and throws the rest away without telling
+  anyone. That is a limit in bytes, not letters — about 1000 English
+  characters, but only 500 Russian or 340 Chinese — so the counter shows bytes
+  against the limit, turns amber as you approach it (or when a translation
+  would cross it) and red when the line will definitely be cut.
+- **"Check ALL config files" now reports over-long lines** — NPC lines,
+  alternate lines and option text — matching the warning the mod writes to
+  `LoadLog.txt`.
+
+### Changed
+- **The quest flow report tells giving from taking.** A quest handed back with
+  TURN_IN_QUEST is now listed as **"turned in at"** instead of being lumped in
+  with "handed over by", so `QuestFlow.txt` reads as the round trip it is.
+
+### Fixed
+- **Picking a quest for ACCEPT_QUEST no longer gets warned about anyway.** The
+  editor warned that ACCEPT_QUEST and TURN_IN_QUEST "only work inside the live
+  quest-detail step" even when you'd named a quest, which stopped being true
+  in 1.3.0. The warning now only appears when no quest is picked, and says how
+  to fix it. Naming a quest that isn't in your quest folder is warned about
+  instead.
+
+---
+
 ## 1.3.0
 
 ### Added

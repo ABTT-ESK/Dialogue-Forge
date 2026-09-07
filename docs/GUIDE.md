@@ -100,10 +100,27 @@ Each button needs two things — its text, and what it does:
 | What it does | Result |
 |---|---|
 | **NONE** | Go to the node you pick in "Next node". |
-| **SHOW_QUEST_LIST** | Open this NPC's quest list. |
+| **SHOW_QUEST_LIST** | Open this NPC's quest list. Quest NPCs only — a trader or AI has no quest-giver ID, so there's no list to build. |
 | **END_CONVERSATION** | Say goodbye and close. |
 | **OPEN_TRADER** | Close and open the shop. Traders only. |
 | **OFFER_QUEST** | Open one quest's offer screen, so the player can read it and accept or decline. Pick the quest in "Quest to use". |
+
+The dropdown only offers the actions that make sense for what you're editing,
+so you can't give a trader a quest list or a quest NPC a shop by accident.
+
+Tick **Show advanced actions** for three more. Two of them take a quest in
+"Quest to use" and then work anywhere, on any character:
+
+| What it does | Result |
+|---|---|
+| **ACCEPT_QUEST** | Hand the quest over immediately, with no offer screen. |
+| **TURN_IN_QUEST** | Take a finished quest back and pay it out, opening the reward picker if there's a choice. The player is told "You haven't finished that yet." if they haven't. |
+| **DECLINE_QUEST** | Only works inside the live quest-detail step the mod builds itself. |
+
+**Giving a trader quests.** A trader can't show a quest list, but it can run a
+whole quest end to end with these: **OFFER_QUEST** to give it, then
+**TURN_IN_QUEST** to take it back. One button per quest, with **Quest lock**
+and **Hide after** swapping them over as the player progresses.
 
 "Next node" only applies to **NONE** — it greys itself out otherwise.
 
