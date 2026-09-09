@@ -30,7 +30,7 @@ Set this first. Pick what the conversation belongs to:
 | Choice | What to enter |
 |---|---|
 | **A single quest NPC** | The NPC's ID. Use **Pick NPC...** to choose by name. |
-| **A trader** | The trader's name, e.g. `Weapons`. |
+| **A trader** | Use **Pick from trader map...** — see below. The name field here only labels the folder. |
 | **Shared by several NPCs** | Every NPC ID that should use it, comma separated. |
 
 The strip at the top of the tab always shows where the file will save.
@@ -38,9 +38,30 @@ The strip at the top of the tab always shows where the file will save.
 Greeting and farewell voice lines are optional. Add several and the mod
 picks one at random.
 
-**Traders only:** you can narrow down *which* trader by class name or world
-position. "Keys that must agree" is how many of those need to match. If you
-only fill in the trader name, set it to 1.
+**Traders only.** Traders have no quest NPC ID, so there is nothing to pick
+them from in the way quest NPCs are picked. Instead, press **Pick from trader
+map...** and choose one of the traders you have already placed. Forge reads
+Expansion's trader `.map` file and fills in all three things that identify that
+trader — its definition name, its entity class and its world position — so the
+conversation attaches to that trader and no other.
+
+It finds the file itself by scanning every mission in your `mpmissions` folder.
+If more than one mission has a trader map it asks which one you mean and shows
+the full path of each, because they are often all called `MyTrader.map` and only
+the path tells them apart. It remembers your answer, and there is a **Browse**
+button if your file lives somewhere unusual.
+
+Two things worth knowing:
+
+- **The "Folder name" field is only your own label.** `Anna` gives you
+  `Trader_Anna`. It is not what the trader is matched on — that is the
+  **Trader definition name**, filled in for you by the picker. (If you leave
+  the definition name empty the mod falls back to the folder name, which works
+  only if you named the folder after the trader's definition or its in-game
+  display name.)
+- **"Keys that must agree"** is how many of the three have to match. The picker
+  sets it for you, and uses all three where two traders share an entity class
+  and a market file, since only the position tells those apart.
 
 **This character's reputation** — give the character a **name** (e.g. *Silent
 Guard*) and it gets its own reputation to track. You never type a code: Forge
@@ -483,7 +504,7 @@ Things it catches:
 - Nodes where every option is hidden behind a quest — players who haven't
   done them see a line of dialogue with no buttons at all
 - Shared conversations with no NPC IDs listed
-- Traders set to match on more keys than you've filled in, which never matches
+- Traders set to match on more keys than you've filled in
 - A trader conversation with no way to reach the shop
 - Invisible colours and windows pushed off-screen
 

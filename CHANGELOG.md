@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **"Pick from trader map..."** on a trader conversation. Traders have no quest
+  NPC ID, so there was never anything to pick them from — you had to copy their
+  details out of a config by hand. Forge now reads Expansion's trader `.map`
+  file and lists every trader you have placed, and choosing one fills in its
+  definition name, entity class and world position together, so the
+  conversation attaches to that trader and no other.
+- It finds the file itself, scanning every mission in `mpmissions` rather than
+  assuming a map. **If more than one mission has a trader map it asks which,
+  showing the full path of each** — several missions can each carry a file
+  called `MyTrader.map`, so the path is the only way to tell them apart. The
+  answer is remembered, and there is a Browse button for a file kept elsewhere.
+- The trader list names the file it read, so you can tell at a glance whether
+  you are looking at the right map.
+- Where two traders share an entity class and a market file, the picker
+  requires all three keys to agree, since only the position tells them apart.
+
+### Fixed
+- **A trader's folder name was being written over its real matching key.** The
+  editor filled the trader field from the folder name when a file was opened,
+  then saved that value back as the trader's `TraderIDs` — so opening
+  `Trader_Anna` (which matched on `Medicals`) and saving it silently changed
+  what the conversation matched on. The folder name and the matching key are
+  now separate fields, and the key is read from and written to the file.
+- The editor no longer claims a trader conversation "will never match" when
+  "keys that must agree" is higher than the number of keys filled in. The mod
+  caps that setting at however many keys exist, so it always matched; it is now
+  a warning that says what the setting actually does.
+- A trader conversation with no keys filled in is no longer reported as broken.
+  The mod falls back to the folder name, which is legitimate — it is now a
+  warning that explains when that fallback works.
+
 ## 1.4.0
 
 ### Added

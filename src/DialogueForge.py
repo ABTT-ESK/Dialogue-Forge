@@ -2314,6 +2314,91 @@ class ColorRow(ttk.Frame):
         return list(self.value)
 
 
+def find_trader_maps(server_root):
+    """Every trader .map under mpmissions\\<mission>\\expansion\\traders.
+
+    Scoped to that folder on purpose: a mission also carries areaflags.map and
+    other .map files that have nothing to do with traders.
+    """
+    found = []
+    missions = os.path.join(server_root, "mpmissions")
+    if not os.path.isdir(missions):
+        return found
+
+    try:
+        entries = sorted(os.listdir(missions))
+    except OSError:
+        return found
+
+    for mission in entries:
+        folder = os.path.join(missions, mission, "expansion", "traders")
+        if not os.path.isdir(folder):
+            continue
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for name in names:
+            if name.lower().endswith(".map"):
+                found.append({
+                    "mission": mission,
+                    "file": name,
+                    "path": os.path.join(folder, name),
+                })
+    return found
+
+
+def parse_trader_map(path):
+    """Read Expansion's trader .map file into pickable entries.
+
+    Each line is  <class>.<market>|<x y z>|<yaw pitch roll>|name:<label>,...
+    Blank lines, comments and anything that doesn't split cleanly are skipped,
+    so a hand-edited file can't crash the picker.
+    """
+    entries = []
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as handle:
+            raw = handle.read()
+    except OSError:
+        return entries
+
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("//") or line.startswith("#"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 2:
+            continue
+
+        head = parts[0].strip()
+        if "." not in head:
+            continue
+        cls, market = head.rsplit(".", 1)
+        cls = cls.strip()
+        market = market.strip()
+        if not cls or not market:
+            continue
+
+        position = " ".join(parts[1].split())
+
+        label = ""
+        if len(parts) >= 4:
+            for chunk in parts[3].split(","):
+                chunk = chunk.strip()
+                if chunk.lower().startswith("name:"):
+                    label = chunk[5:].strip()
+                    break
+
+        entries.append({
+            "name": label or market,
+            "market": market,
+            "class": cls,
+            "position": position,
+        })
+
+    return entries
+
+
 # ---------------------------------------------------------------- validation
 
 def kind_and_key_from_path(path):
@@ -2552,11 +2637,28 @@ def validate_tree_dict(data, kind, key, quest_index=None):
             1 if data.get("TraderClassNames") else 0,
             1 if data.get("TraderPositions") else 0,
         ])
-        wanted = safe_int(data.get("TraderMinKeyMatches", 2), 2)
-        if wanted > keys:
+        if keys == 0 and not key:
             issues.append(
-                "TraderMinKeyMatches is %s but only %d trader key(s) are "
-                "filled in - this tree will never match." % (wanted, keys))
+                "This trader conversation has nothing to match on. Fill in the "
+                "trader's definition name, or put the file in a Trader_<name> "
+                "folder so the folder name can be used instead.")
+        elif keys == 0:
+            warnings.append(
+                "No trader keys are filled in, so the mod falls back to the "
+                "folder name \"%s\" - that only works if it is the trader's "
+                "definition name or its in-game display name. Use 'Pick from "
+                "trader map...' to set it exactly." % key)
+        #! The folder name becomes TraderIDs when the file lists none.
+        effective = keys or (1 if key else 0)
+        wanted = safe_int(data.get("TraderMinKeyMatches", 2), 2)
+        if wanted > effective and effective:
+            #! The mod clamps the requirement to however many keys are
+            #! actually declared, so this cannot stop the tree matching -- it
+            #! just is not doing what the number says.
+            warnings.append(
+                "Keys that must agree is %s but only %d is filled in, so it "
+                "behaves as %d. Fill in more keys or lower the setting."
+                % (wanted, effective, effective))
         if not any(r.get("ActionType") == "OPEN_TRADER"
                    for nd in nodes for r in nd.get("Responses", [])):
             warnings.append(
@@ -2761,6 +2863,147 @@ class ChooserDialog(tk.Toplevel):
         self.destroy()
 
 
+class TraderMapFileChooser(tk.Toplevel):
+    """Choose which trader map file to read, with the full path visible."""
+
+    def __init__(self, app, maps):
+        tk.Toplevel.__init__(self, app)
+        self.app = app
+        self.maps = maps
+        self.chosen = None
+        self.browse = False
+
+        self.title("Which trader map?")
+        self.geometry("820x360")
+        self.transient(app)
+        self.grab_set()
+
+        ttk.Label(self,
+                  text="More than one mission on this server has a trader map. "
+                       "Pick the one for the map you actually run - check the "
+                       "path.",
+                  wraplength=780, style="Hint.TLabel").pack(
+                      anchor="w", padx=12, pady=(12, 6))
+
+        self.list = ttk.Treeview(self, columns=("mission", "file", "path"),
+                                 show="headings", selectmode="browse")
+        for key, heading, width in (("mission", "Mission", 190),
+                                    ("file", "File", 140),
+                                    ("path", "Full path", 460)):
+            self.list.heading(key, text=heading)
+            self.list.column(key, width=width, anchor="w")
+        self.list.pack(fill="both", expand=True, padx=12)
+        self.list.bind("<Double-Button-1>", lambda _e: self.confirm())
+
+        for index, entry in enumerate(self.maps):
+            self.list.insert("", "end", iid=str(index),
+                             values=(entry["mission"], entry["file"],
+                                     entry["path"]))
+        if self.maps:
+            self.list.selection_set("0")
+
+        buttons = ttk.Frame(self)
+        buttons.pack(fill="x", padx=12, pady=10)
+        ttk.Button(buttons, text="Use this",
+                   command=self.confirm).pack(side="right")
+        ttk.Button(buttons, text="Cancel",
+                   command=self.destroy).pack(side="right", padx=6)
+        ttk.Button(buttons, text="Browse for another file...",
+                   command=self.pick_other).pack(side="left")
+
+        app.skin_window(self)
+
+    def confirm(self):
+        selection = self.list.selection()
+        if not selection:
+            return
+        self.chosen = self.maps[int(selection[0])]["path"]
+        self.destroy()
+
+    def pick_other(self):
+        self.browse = True
+        self.destroy()
+
+
+class TraderMapChooser(tk.Toplevel):
+    """Pick one trader out of a parsed .map file. Sets self.chosen to its dict."""
+
+    def __init__(self, app, entries, source=""):
+        tk.Toplevel.__init__(self, app)
+        self.app = app
+        self.entries = entries
+        self.chosen = None
+
+        self.title("Pick a trader")
+        self.geometry("760x460")
+        self.transient(app)
+        self.grab_set()
+
+        ttk.Label(self,
+                  text="Every trader placed in your trader map file. Picking "
+                       "one fills in its definition name, entity class and "
+                       "position, so it matches that trader and no other.",
+                  wraplength=720, style="Hint.TLabel").pack(
+                      anchor="w", padx=12, pady=(12, 4))
+
+        #! Name the file being read: several missions can each carry a
+        #! MyTrader.map, so "which one is this?" is a fair question.
+        if source:
+            ttk.Label(self, text="Reading: " + source, wraplength=720,
+                      style="Accent.TLabel").pack(anchor="w", padx=12,
+                                                  pady=(0, 4))
+
+        search_row = ttk.Frame(self)
+        search_row.pack(fill="x", padx=12, pady=(4, 6))
+        ttk.Label(search_row, text="Search").pack(side="left")
+        self.search = ttk.Entry(search_row)
+        self.search.pack(side="left", fill="x", expand=True, padx=6)
+        self.search.bind("<KeyRelease>", lambda _e: self.refresh())
+
+        columns = ("name", "market", "cls", "pos")
+        self.list = ttk.Treeview(self, columns=columns, show="headings",
+                                 selectmode="browse")
+        for key, heading, width in (
+                ("name", "Trader", 130),
+                ("market", "Definition name", 150),
+                ("cls", "Entity class", 210),
+                ("pos", "Position", 220)):
+            self.list.heading(key, text=heading)
+            self.list.column(key, width=width, anchor="w")
+        self.list.pack(fill="both", expand=True, padx=12)
+        self.list.bind("<Double-Button-1>", lambda _e: self.confirm())
+
+        buttons = ttk.Frame(self)
+        buttons.pack(fill="x", padx=12, pady=10)
+        ttk.Button(buttons, text="Use this",
+                   command=self.confirm).pack(side="right")
+        ttk.Button(buttons, text="Cancel",
+                   command=self.destroy).pack(side="right", padx=6)
+
+        self.refresh()
+        app.skin_window(self)
+        self.search.focus_set()
+
+    def refresh(self):
+        needle = self.search.get().strip().lower()
+        self.list.delete(*self.list.get_children())
+        for index, entry in enumerate(self.entries):
+            haystack = "%s %s %s" % (entry["name"], entry["market"],
+                                     entry["class"])
+            if needle and needle not in haystack.lower():
+                continue
+            self.list.insert("", "end", iid=str(index),
+                             values=(entry["name"], entry["market"],
+                                     entry["class"], entry["position"]))
+
+    def confirm(self):
+        selection = self.list.selection()
+        if not selection:
+            return
+        self.chosen = self.entries[int(selection[0])]
+        self.destroy()
+
+
 # ---------------------------------------------------------------- dialogue tab
 
 class DialogueTab(ttk.Frame):
@@ -2866,8 +3109,24 @@ class DialogueTab(ttk.Frame):
                                sticky="w", padx=6, pady=(6, 8))
 
         self.trader_frame = ttk.LabelFrame(
-            left, text="Narrow down which trader (optional)",
+            left, text="Which trader does this attach to?",
             style="Section.TLabelframe")
+        pick_row = ttk.Frame(self.trader_frame)
+        pick_row.pack(fill="x", padx=6, pady=(6, 2))
+        ttk.Button(pick_row, text="Pick from trader map...", width=24,
+                   command=self.browse_trader_map).pack(side="left")
+        ttk.Label(pick_row,
+                  text="Fills all three from a trader you have already placed.",
+                  style="Hint.TLabel").pack(side="left", padx=8)
+
+        self.trader_ids = StringListEditor(
+            self.trader_frame, "Trader definition names",
+            "The trader's entry in Expansion's market config, e.g. Medicals. "
+            "NOT the folder name above - that is just your own label. Open the "
+            "trader in game and the client log prints name='...'.",
+            height=3, on_change=self.mark_dirty)
+        self.trader_ids.pack(fill="x", padx=4, pady=2)
+
         self.trader_extra = StringListEditor(
             self.trader_frame, "Entity class names",
             "e.g. ExpansionTraderAIDenis - matches every trader using "
@@ -3579,6 +3838,54 @@ class DialogueTab(ttk.Frame):
             return "Trader %s" % key
         return (self.file_name.get() or "NPC").replace(".json", "")
 
+    def browse_trader_map(self):
+        path = self.app.ensure_trader_map()
+        if not path:
+            return
+
+        entries = parse_trader_map(path)
+        if not entries:
+            messagebox.showinfo(
+                APP_TITLE,
+                "No traders found in that file. A trader map line looks like:\n\n"
+                "ExpansionTraderAIMaria.Medicals|6500.47 6.63 2243.81|110 0 0|"
+                "name:Anna", parent=self)
+            return
+
+        dialog = TraderMapChooser(self.app, entries, path)
+        self.wait_window(dialog)
+        if not dialog.chosen:
+            return
+
+        chosen = dialog.chosen
+        self.target_kind.set("TRADER")
+        self.on_target_change()
+
+        #! Only name the folder if it has no name yet -- the folder is the
+        #! author's own label and renaming it would move the file.
+        if not self.folder_key.get().strip():
+            safe = re.sub(r"[^A-Za-z0-9_-]", "", chosen["name"])
+            self.folder_key.set(safe or chosen["market"])
+
+        self.trader_ids.set_items([chosen["market"]])
+        self.trader_extra.set_items([chosen["class"]])
+        self.trader_positions.set_items([chosen["position"]])
+
+        self.radius.delete(0, tk.END)
+        self.radius.insert(0, "8.0")
+
+        #! Two traders can share a class and a market file (a second Weapons
+        #! trader elsewhere on the map). Where that happens only the position
+        #! tells them apart, so all three keys have to agree.
+        twins = sum(1 for e in entries
+                    if e["class"] == chosen["class"]
+                    and e["market"] == chosen["market"])
+        self.min_keys.set("3" if twins > 1 else "2")
+
+        self.mark_dirty()
+        self.update_path_preview()
+        self.refresh_all()
+
     def browse_npcs(self):
         if not self.app.ensure_quest_folder():
             return
@@ -3616,10 +3923,12 @@ class DialogueTab(ttk.Frame):
             self.key_entry.state(["!disabled"])
             self.pick_npc_button.state(["!disabled"])
         elif kind == "TRADER":
-            self.key_label.configure(text="Trader definition name")
+            self.key_label.configure(text="Folder name (your label)")
             self.key_hint.configure(
-                text="The trader's file name, e.g. Weapons. Open the trader "
-                     "in game and the client log prints fileName=...")
+                text="Only names the folder, e.g. Anna gives Trader_Anna. It is "
+                     "NOT what the trader is matched on - put that in 'Trader "
+                     "definition names' below. Traders have no quest NPC ID, "
+                     "which is why there is nothing to pick from.")
             self.trader_frame.pack(fill="x", pady=(6, 0))
             self.ai_frame.pack_forget()
             self.key_entry.state(["!disabled"])
@@ -3719,8 +4028,9 @@ class DialogueTab(ttk.Frame):
                     ids.append(safe_int(part, 0))
             self.tree["NPCIDs"] = [i for i in ids if i > 0]
         elif kind == "TRADER":
-            if key:
-                self.tree["TraderIDs"] = [key]
+            #! Whatever the author typed under "Trader definition names".
+            #! Never the folder name -- see load, above.
+            self.tree["TraderIDs"] = self.trader_ids.get_items()
             self.tree["TraderClassNames"] = self.trader_extra.get_items()
             self.tree["TraderPositions"] = self.trader_positions.get_items()
             self.tree["TraderPositionRadius"] = safe_float(
@@ -4884,13 +5194,18 @@ class DialogueTab(ttk.Frame):
             elif folder.startswith("Trader_"):
                 self.target_kind.set("TRADER")
                 self.folder_key.set(folder[7:])
+                #! TraderIDs comes from the FILE. Deriving it from the folder
+                #! is what silently rewrote Trader_Anna's key to "Anna".
+                self.trader_ids.set_items(
+                    [str(t) for t in (data.get("TraderIDs") or [])])
             elif folder == "Shared":
                 self.target_kind.set("SHARED")
                 self.folder_key.set(", ".join(
                     str(i) for i in (data.get("NPCIDs") or [])))
         elif data.get("TraderIDs"):
             self.target_kind.set("TRADER")
-            self.folder_key.set(data["TraderIDs"][0])
+            self.folder_key.set(str(data["TraderIDs"][0]))
+            self.trader_ids.set_items([str(t) for t in data["TraderIDs"]])
         if safe_int(data.get("AIPatrolID", 0), 0) > 0:
             self.target_kind.set("AI")
         self.refresh_all()
@@ -7983,6 +8298,7 @@ class App(tk.Tk):
 
         self.profile_path = tk.StringVar(value="")
         self.quest_folder = tk.StringVar(value="")
+        self.trader_map = tk.StringVar(value="")
         self.quest_index = []
         self.npc_index = []
         self.theme_name = "dark"
@@ -8273,6 +8589,68 @@ class App(tk.Tk):
         self.save_settings()
         self.scan_quests(announce=True)
         return True
+
+    def ensure_trader_map(self):
+        """The trader .map path, asking once and remembering the answer."""
+        current = self.trader_map.get()
+        if current and os.path.isfile(current):
+            return current
+
+        maps = self.find_trader_maps()
+
+        if len(maps) == 1:
+            self.trader_map.set(maps[0]["path"])
+            self.save_settings()
+            return self.trader_map.get()
+
+        if len(maps) > 1:
+            #! Several missions on one server -- only one is the map being
+            #! played, so never guess. Show the paths and let them choose.
+            dialog = TraderMapFileChooser(self, maps)
+            self.wait_window(dialog)
+            if dialog.chosen:
+                self.trader_map.set(dialog.chosen)
+                self.save_settings()
+                return self.trader_map.get()
+            if not dialog.browse:
+                return ""
+
+        return self.pick_trader_map()
+
+    def find_trader_maps(self):
+        """Trader maps under every mission of the server we can identify."""
+        roots = []
+        profile = self.profile_path.get()
+        if profile:
+            #! ...\<server>\Profiles\DialogFramework -> ...\<server>, but
+            #! a profile folder is not always two deep, so walk up a little.
+            walk = os.path.normpath(profile)
+            for _ in range(4):
+                walk = os.path.dirname(walk)
+                if not walk or walk in roots:
+                    break
+                roots.append(walk)
+
+        seen = set()
+        found = []
+        for root in roots:
+            for entry in find_trader_maps(root):
+                key = os.path.normcase(entry["path"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append(entry)
+        return found
+
+    def pick_trader_map(self):
+        path = filedialog.askopenfilename(
+            title="Pick your Expansion trader map file",
+            filetypes=[("Trader map", "*.map"), ("All files", "*.*")])
+        if not path:
+            return ""
+        self.trader_map.set(os.path.normpath(path))
+        self.save_settings()
+        return self.trader_map.get()
 
     def ensure_quest_folder(self):
         if self.quest_folder.get() and os.path.isdir(self.quest_folder.get()):
@@ -8678,6 +9056,7 @@ class App(tk.Tk):
                 data = json.load(handle)
             self.profile_path.set(data.get("profile_path", ""))
             self.quest_folder.set(data.get("quest_folder", ""))
+            self.trader_map.set(data.get("trader_map", ""))
             if data.get("theme") in PALETTES:
                 self.theme_name = data["theme"]
             if data.get("ui_language") in LANGUAGE_LABELS:
@@ -8690,6 +9069,7 @@ class App(tk.Tk):
             with open(SETTINGS_FILE, "w", encoding="utf-8") as handle:
                 json.dump({"profile_path": self.profile_path.get(),
                            "quest_folder": self.quest_folder.get(),
+                           "trader_map": self.trader_map.get(),
                            "theme": self.theme_name,
                            "ui_language": self.ui_language}, handle)
         except Exception:
