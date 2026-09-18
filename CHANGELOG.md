@@ -1,23 +1,95 @@
 # Changelog
 
-## Unreleased
+## 1.5.0
 
 ### Added
+- **"Only while" on a button**, next to Quest lock and Hide after. Pick a quest
+  and a state — not started yet, in progress, ready to hand in, or completed —
+  and the button only appears then. A note under it says in plain words what
+  the button will do.
+- **P2P traders are now a target type.** Pick **A P2P trader** and then
+  **Pick a P2P trader...**, and Forge reads `expansion\p2pmarket` for every one
+  you have placed and fills in its id. Their ids are unique, so that is all it
+  takes to attach the conversation.
+- P2P conversations are checked like any other: a missing id, a missing way
+  through to the market, and a quest list on a trader that cannot show one.
+
+### Fixed
+- **"Pick from trader map..." could only ever show one trader zone.** Expansion
+  loads every `.map` file in a mission's `expansion\traders` folder, and plenty
+  of servers keep one per trader zone, but Forge had you pick a single file and
+  then remembered it for good — every other zone's traders were out of reach,
+  and restarting didn't help. It now reads all of a mission's trader maps at
+  once, and only asks which mission when more than one has traders.
+  - The trader list shows which **Map file** each trader is in, with a filter
+    to narrow it to one zone when there is more than one file.
+  - **Change map...** on the trader list goes back to that question.
+    Cancelling it returns you to the list.
+  - A choice saved by 1.4.0 (one file) is widened to its whole traders folder,
+    and a saved choice from a different server is dropped once the profile
+    folder points somewhere else.
+- **Twin traders in different zones were missed.** Two traders sharing an
+  entity class and a definition only count as twins — and get all three keys
+  required — if the picker can see both. It only looked at the chosen file, so
+  a twin in another zone went unnoticed and could pick up the same
+  conversation. Every file is checked now.
+- **A trader that walks a route** had its whole waypoint list pasted in as one
+  position the mod can't read. Each waypoint is now its own position. A
+  waypoint given as just `x z` (no height) is left out, with a note on how to
+  get the full position from the client log.
+- **A false "players will never see it" warning on traders that give quests.**
+  Back buttons for the offer, in-progress and hand-in screens were reported as
+  unused on any conversation without a quest list — but `OFFER_QUEST` opens
+  those same screens. The warning now only appears when nothing in the
+  conversation, its stages included, opens a quest screen.
+
+---
+
+## 1.4.0
+
+### Added
+- **"Quest to use" now works for TURN_IN_QUEST**, alongside OFFER_QUEST and
+  ACCEPT_QUEST. Pick the quest and that button hands it in from any character
+  — which is how you give a **trader** a quest to take back. The note under
+  the box tells you what the button will do either way.
 - **"Pick from trader map..."** on a trader conversation. Traders have no quest
   NPC ID, so there was never anything to pick them from — you had to copy their
-  details out of a config by hand. Forge now reads Expansion's trader `.map`
-  file and lists every trader you have placed, and choosing one fills in its
+  details out of a config by hand. Forge reads Expansion's trader `.map` file
+  and lists every trader you have placed, and choosing one fills in its
   definition name, entity class and world position together, so the
   conversation attaches to that trader and no other.
-- It finds the file itself, scanning every mission in `mpmissions` rather than
-  assuming a map. **If more than one mission has a trader map it asks which,
-  showing the full path of each** — several missions can each carry a file
-  called `MyTrader.map`, so the path is the only way to tell them apart. The
-  answer is remembered, and there is a Browse button for a file kept elsewhere.
-- The trader list names the file it read, so you can tell at a glance whether
-  you are looking at the right map.
-- Where two traders share an entity class and a market file, the picker
-  requires all three keys to agree, since only the position tells them apart.
+  - It finds the file itself, scanning every mission in `mpmissions`. If more
+    than one mission has a trader map it asks which, showing the full path of
+    each — several missions can each carry a file called `MyTrader.map`, so the
+    path is the only way to tell them apart. The answer is remembered, and
+    there is a Browse button for a file kept elsewhere.
+  - The trader list names the file it read, so you can tell at a glance whether
+    you are looking at the right map.
+  - Where two traders share an entity class and a market file, the picker
+    requires all three keys to agree, since only the position tells them apart.
+- **The action dropdown only offers what can actually work** for the kind of
+  character you're editing. A trader is no longer offered SHOW_QUEST_LIST (it
+  has no quest list to show), a quest NPC is no longer offered OPEN_TRADER,
+  and RECRUIT_AI / GO_HOSTILE stay on AI. The advanced quest actions stay
+  available everywhere, because they name their quest by ID.
+- **A live byte counter under "What the NPC says here."** The game reads at
+  most **1023 bytes** of any one line and throws the rest away without telling
+  anyone. That is a limit in bytes, not letters — about 1000 English
+  characters, but only 500 Russian or 340 Chinese — so the counter shows bytes
+  against the limit, turns amber as you approach it (or when a translation
+  would cross it) and red when the line will definitely be cut.
+- **Two new warnings** in "Check ALL config files":
+  - a button using SHOW_QUEST_LIST on a trader or AI tree, which would have
+    tried to list every quest on the server;
+  - RECRUIT_AI or GO_HOSTILE outside an AI tree.
+- **"Check ALL config files" now reports over-long lines** — NPC lines,
+  alternate lines and option text — matching the warning the mod writes to
+  `LoadLog.txt`.
+
+### Changed
+- **The quest flow report tells giving from taking.** A quest handed back with
+  TURN_IN_QUEST is now listed as **"turned in at"** instead of being lumped in
+  with "handed over by", so `QuestFlow.txt` reads as the round trip it is.
 
 ### Fixed
 - **A trader's folder name was being written over its real matching key.** The
@@ -33,41 +105,6 @@
 - A trader conversation with no keys filled in is no longer reported as broken.
   The mod falls back to the folder name, which is legitimate — it is now a
   warning that explains when that fallback works.
-
-## 1.4.0
-
-### Added
-- **"Quest to use" now works for TURN_IN_QUEST**, alongside OFFER_QUEST and
-  ACCEPT_QUEST. Pick the quest and that button hands it in from any character
-  — which is how you give a **trader** a quest to take back. The note under
-  the box tells you what the button will do either way.
-- **The action dropdown only offers what can actually work** for the kind of
-  character you're editing. A trader is no longer offered SHOW_QUEST_LIST (it
-  has no quest list to show), a quest NPC is no longer offered OPEN_TRADER,
-  and RECRUIT_AI / GO_HOSTILE stay on AI. The advanced quest actions stay
-  available everywhere, because they name their quest by ID.
-- **Two new warnings** in "Check ALL config files":
-  - a button using SHOW_QUEST_LIST on a trader or AI tree, which would have
-    tried to list every quest on the server;
-  - RECRUIT_AI or GO_HOSTILE outside an AI tree.
-
-### Added
-- **A live byte counter under "What the NPC says here."** The game reads at
-  most **1023 bytes** of any one line and throws the rest away without telling
-  anyone. That is a limit in bytes, not letters — about 1000 English
-  characters, but only 500 Russian or 340 Chinese — so the counter shows bytes
-  against the limit, turns amber as you approach it (or when a translation
-  would cross it) and red when the line will definitely be cut.
-- **"Check ALL config files" now reports over-long lines** — NPC lines,
-  alternate lines and option text — matching the warning the mod writes to
-  `LoadLog.txt`.
-
-### Changed
-- **The quest flow report tells giving from taking.** A quest handed back with
-  TURN_IN_QUEST is now listed as **"turned in at"** instead of being lumped in
-  with "handed over by", so `QuestFlow.txt` reads as the round trip it is.
-
-### Fixed
 - **Picking a quest for ACCEPT_QUEST no longer gets warned about anyway.** The
   editor warned that ACCEPT_QUEST and TURN_IN_QUEST "only work inside the live
   quest-detail step" even when you'd named a quest, which stopped being true

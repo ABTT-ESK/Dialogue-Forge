@@ -31,6 +31,7 @@ Set this first. Pick what the conversation belongs to:
 |---|---|
 | **A single quest NPC** | The NPC's ID. Use **Pick NPC...** to choose by name. |
 | **A trader** | Use **Pick from trader map...** — see below. The name field here only labels the folder. |
+| **A P2P trader** | Use **Pick a P2P trader...** — Forge reads your `expansion\p2pmarket` folder. |
 | **Shared by several NPCs** | Every NPC ID that should use it, comma separated. |
 
 The strip at the top of the tab always shows where the file will save.
@@ -45,10 +46,17 @@ Expansion's trader `.map` file and fills in all three things that identify that
 trader — its definition name, its entity class and its world position — so the
 conversation attaches to that trader and no other.
 
-It finds the file itself by scanning every mission in your `mpmissions` folder.
-If more than one mission has a trader map it asks which one you mean and shows
-the full path of each, because they are often all called `MyTrader.map` and only
-the path tells them apart. It remembers your answer, and there is a **Browse**
+It finds your trader maps itself by scanning every mission in your
+`mpmissions` folder, and reads **every** `.map` file in the mission's
+`expansion\traders` folder — the same files Expansion loads — so if you keep
+one file per trader zone, all of your zones are listed together. The **Map
+file** column shows which file each trader is in, and the filter next to
+**Search** narrows the list to one of them.
+
+If more than one mission has traders it asks which one you run and shows the
+full path of each, because the files are often all called `MyTrader.map` and
+only the path tells them apart. It remembers your answer. **Change map...** on
+the trader list takes you back to that question, which also has a **Browse**
 button if your file lives somewhere unusual.
 
 Two things worth knowing:
@@ -144,6 +152,11 @@ whole quest end to end with these: **OFFER_QUEST** to give it, then
 and **Hide after** swapping them over as the player progresses.
 
 "Next node" only applies to **NONE** — it greys itself out otherwise.
+
+**Only while** shows a button only during one stage of a quest — pick the quest
+and then *not started yet*, *in progress*, *ready to hand in*, or *completed*.
+The usual use is a hand-in button that stays hidden until the player has
+actually finished the job, instead of sitting there and refusing.
 
 **Quest lock** hides a button until the player has *completed* that quest.
 **Hide after** does the opposite — the button disappears once that quest is
