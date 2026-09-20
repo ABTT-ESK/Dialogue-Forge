@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.6.0
+
+### Added
+- **The interface reads in Russian**, thanks to a translation contributed by
+  **ave-ladan**. It covers the editing tabs, the quest wording and menu
+  screens, the AI and faction screens, the patrol builder and the server files
+  tab -- 117 strings, up from 29. Four labels have gained extra wording since
+  the translation was written and still read in English; they are the only ones
+  left.
+
+---
+
 ## 1.5.0
 
 ### Added
