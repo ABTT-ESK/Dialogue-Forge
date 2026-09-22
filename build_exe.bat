@@ -118,7 +118,6 @@ echo   Single file : dist\DialogueForge.exe
 echo   Folder      : dist_folder\DialogueForge\   (zip this to release)
 echo.
 echo   Neither needs Python on the target PC.
-echo   Read docs\RELEASING.md before publishing.
 echo  ===================================================================
 echo.
 pause

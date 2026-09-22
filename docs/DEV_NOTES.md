@@ -6,15 +6,25 @@ of this — see [`GUIDE.md`](GUIDE.md).
 The app is a single file, `src/DialogueForge.py`, laid out top to bottom:
 constants → theme/artwork → helpers → spellcheck → shared widgets →
 validation → the tabs (Dialogue, Quest wording, Translations, Menu appearance,
-Global AI settings, Factions, AI patrols, Server files) → live preview → main
-app. `# ----` banners mark each section.
+Reputation, Global AI settings, Factions, AI patrols, Import, Server files) →
+live preview → main app. `# ----` banners mark each section.
 
 Every tab implements the same contract the main app calls: `load(data)`,
 `build_output()`, `output_path()`, and `validate()` (returns `(issues,
-warnings)`). New file types are wired in five places: the notebook, `editor_name`,
+warnings)`). New file types are wired in six places: the notebook, `editor_name`,
 `current_editor`, `load_path` (open-file type detection), `scan_files` /
 `check_all_files` (Server files list + sweep), and `auto_load_menu_config`
-(load on profile pick).
+(runs at startup and on picking a folder).
+
+**A tab that owns one whole file** — Menu appearance (with Reputation, which
+shares its file), Global AI settings, Factions, AI patrols — also goes in
+`single_file_owner`, and calls `mark_loaded(tab, path)` whenever it loads or
+writes that file. Saving writes the entire file from the tab, so a tab that
+never read it, or read it before something else changed it, would replace
+every setting in it. `confirm_unread_overwrite` compares the file's
+`file_stamp` (path, modification time, size) with the one recorded and asks
+before writing when they differ. Forgetting `mark_loaded` is safe but noisy
+(it asks every time); forgetting `single_file_owner` removes the protection.
 
 ## AI patrols / factions tabs
 

@@ -2,6 +2,12 @@
 
 Everything the program does, tab by tab. Skim the bit you need.
 
+**If your server is already running, start on the Import tab.** It reads the
+traders, NPCs and patrols you have already placed and writes each one a
+conversation that is already wired to them, so you skip the fiddly half —
+folder names, ids, trader keys — and go straight to writing what they say.
+That section is next, after the two folder boxes it needs.
+
 ---
 
 ## Before anything else
@@ -16,6 +22,91 @@ server once if it isn't there yet.
 **Expansion quests** — optional but worth doing. Point it at your Expansion
 `Quests` folder and every quest field turns into a dropdown of real quest
 names instead of ID numbers. It finds NPC names too.
+
+---
+
+## Import — start here
+
+The fastest way in. Everyone on your server, listed with whether they can talk
+yet, and a button that writes the ones you pick a starter conversation already
+pointed at them.
+
+**Nothing on your server is changed or moved** — except the one thing you can
+ask for explicitly, further down, and even that keeps a backup.
+
+<img src="images/DF2.png" alt="The Import tab listing quest NPCs that can't talk yet, and AI patrols with their full routes">
+
+
+### Traders, P2P traders and quest NPCs
+
+**Look at my server** reads your trader maps, your P2P traders and your
+Expansion quest NPCs, and lists every one with a **Can talk?** column.
+
+**Pick everyone who can't talk yet** selects exactly those, so you don't have
+to go through the list by hand. Or tick them yourself — click a column heading
+to sort by it, click again to reverse, and type in the box above the list to
+narrow it. Right-click a row for *Show only …* on the value under the pointer.
+
+**Write starter conversations** creates a conversation file for each one you
+picked, in the right folder, with the trader key or NPC id already filled in.
+A quest NPC's starter opens with the greeting they already say in Expansion,
+so it sounds like the same character from the first line.
+
+**Open the one I picked** takes you straight to the Dialogue tab with that
+conversation loaded, ready to write.
+
+A realistic first session: *Look at my server* → *Pick everyone who can't talk
+yet* → *Write starter conversations* → then work down the list on the Dialogue
+tab, replacing the placeholder lines one character at a time. Your server keeps
+running the whole while; nothing takes effect until you restart it.
+
+### Expansion AI patrols
+
+The lower half reads your `AIPatrolSettings.json` and lists every patrol with
+its name, faction, loadout, squad size and its **whole route** — every
+waypoint, not an abbreviation. Pick the squads you want talking and leave the
+rest alone.
+
+**Read my patrol file** loads it. **Pick every one that can talk** selects the
+usable ones. **Make the picked ones talkable** copies them into the mod's own
+patrol file with a dialogue link attached.
+
+Two questions sit under the list, each with a **Yes** and a **No** rather than
+a tick box:
+
+- **One conversation for all of them?** — *Yes* gives the whole batch one
+  shared conversation; *No* gives each patrol its own.
+- **Delete them from AIPatrolSettings.json afterwards?** — see below.
+
+**Some patrols can't be made talkable**, and the list says so with the reason
+rather than quietly skipping them. A patrol that spawns on an object instead of
+walking a route is the usual case: Expansion builds those routes as the map
+loads, so there is nothing for this mod to spawn.
+
+### The thing that catches people out: patrols spawning twice
+
+Once a patrol is talkable it lives in the mod's patrol file. If the original is
+still sitting in `AIPatrolSettings.json`, **both** copies spawn — two identical
+squads in one place, and only one of them talks.
+
+DialogueForge handles this two ways:
+
+- **Before it happens** — answer *Delete them from AIPatrolSettings.json
+  afterwards?* with **Yes** and the patrols you just copied are removed from it
+  as part of the same job. A `.bak` of the file is kept beside it first. If the
+  file changed since it was read, nothing is deleted and it tells you — the
+  positions would have shifted and the wrong squad would go.
+- **After it happens** — if you already have duplicates from an earlier round,
+  the list says so on the row and counts them above it. **Clean up the ones
+  that spawn twice** deletes just those originals. Your talkable copies are
+  untouched, and a `.bak` is kept.
+
+### A patrol from somewhere else
+
+**Or paste a single patrol from somewhere else** takes everything from a
+patrol's opening `{` to its matching `}` — from a guide, or from another
+server — and converts it the same way. Use it for a patrol that isn't in your
+file yet.
 
 ---
 
@@ -266,8 +357,24 @@ How the dialogue window looks.
 **Colours** — a picker and a transparency slider for each part of the
 window. Four ready-made palettes are in the Preset dropdown.
 
-**Font style** — four text presets built into the mod: `DEFAULT`, `LIGHT`
-(thinner), `LARGE` (bigger), `COMPACT` (smaller, fits more options).
+**Font** — thirteen typefaces, all built into the mod. Each one's description
+in the dropdown says whether it covers Russian:
+
+- **Cover Russian:** `INTER` (clean modern sans), `GARAMOND` (EB Garamond, a
+  classic book serif), `NOTOSERIF` (sturdy and readable), plus DayZ's own
+  `DEFAULT`, `LIGHT`, `BLACK`, `METRON`, `SERIF` and `ETELKA`.
+- **No Russian:** `CONDENSED` (tall and narrow), `ZILLA` (chunky slab),
+  `TYPEWRITER` (Special Elite) and `BLACKOPS` (Black Ops One). Russian text in
+  these draws as boxes, so skip them if you have Russian players.
+
+Chinese and Japanese come from DayZ's own font whatever you pick.
+
+**Text size** — `NORMAL`, `LARGE` (bigger, easier at distance) or `COMPACT`
+(smaller, fits more options). Separate from the font, so any combination works.
+
+Nothing to repack: every pairing ships as a ready-made layout inside the mod.
+For a typeface the mod doesn't ship, **Layout override** further down still
+points at your own layout file.
 
 **Already-picked fade** dims options the player has already chosen this
 conversation.
@@ -290,6 +397,35 @@ theme you set. Off by default.
 Turn it on and both previews show the icons, picked from what each option
 actually does — so on the Dialogue tab you can see at a glance whether an
 option reads as "this ends the chat" before a player ever clicks it.
+
+---
+
+## Reputation
+
+The reputation settings that apply to your whole server. They are saved in
+`MenuConfig.json`, the same file as Menu appearance, so saving from either tab
+saves both — and both share one unsaved-changes mark.
+
+**Tell players who a choice pleased or annoyed** turns on the pop-up that names
+the character and how far their standing moved — *Yefim  +5*. It only fires for
+changes a player caused by picking something; reputation handed out by a quest
+stays quiet. Players can override it for themselves under Settings in the
+conversation window.
+
+**The standing page in Expansion's book** is the page where players see where
+they stand with every character at once. Five boxes name it: the tab, the page
+heading, and its three column headings. Beside each box is the word the mod
+falls back to if you leave it empty — and that fallback is translated, so a
+German player sees German and a Russian player sees Russian. Type something in
+and it reads that way for everyone, whatever language they play in.
+
+**What isn't here.** A character's own reputation — its name, its ranks, the
+icons beside them and the most it can reach — belongs to that character's
+conversation, so it is on the Dialogue tab under *Who it's for & voice lines*.
+What a quest pays out is on the Quest wording tab, under *Reputation for
+finishing this quest*.
+
+---
 
 ## Global AI settings
 

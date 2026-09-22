@@ -3,12 +3,66 @@
 ## 1.6.0
 
 ### Added
-- **The interface reads in Russian**, thanks to a translation contributed by
-  **ave-ladan**. It covers the editing tabs, the quest wording and menu
-  screens, the AI and faction screens, the patrol builder and the server files
-  tab -- 117 strings, up from 29. Four labels have gained extra wording since
-  the translation was written and still read in English; they are the only ones
-  left.
+- **Import tab.** Reads the traders, P2P traders, quest NPCs and AI patrols
+  your server already has, shows which ones can't talk yet, and writes each a
+  starter conversation with the IDs, folders and trader keys already filled
+  in. All that's left is writing what they say. Quest NPCs start with the
+  line they already say in Expansion. Nothing else on your server changes.
+  - **AI patrols** are listed with their name, faction, loadout, squad size
+    and route. Pick the ones you want talking. Patrols that spawn on objects
+    can't be imported, and the list says why.
+  - **Patrols that spawn twice are flagged.** If a talkable patrol's original
+    is still in `AIPatrolSettings.json`, both spawn. **Clean up the ones that
+    spawn twice** removes the originals and keeps a `.bak`.
+  - **Delete the originals as you import** by answering Yes to *Delete them
+    from AIPatrolSettings.json afterwards?* A `.bak` is kept, and nothing is
+    deleted if the file changed since it was read.
+  - **Paste a patrol** from a guide or another server to import it.
+  - **Sort and filter the lists.** Click a heading to sort, type to filter, or
+    right-click a cell for *Show only...*. Columns size to fit.
+- **Long lines.** A spoken line or translation can be any length. The game
+  cuts a line at about 1000 characters (fewer in Russian or Chinese), so
+  longer ones are saved in pieces that Dialogue Framework 1.6.0 joins back
+  together. You still type one line.
+  - The counter under a line shows how many pieces a long one takes.
+  - **Check ALL config files** flags a too-long line in a file saved before
+    1.6.0. Open and save it here to fix it.
+  - Options and quest wording aren't split; you're warned when one runs long.
+- **Reputation updates.**
+  - **A standing page in Expansion's book**, new in Dialogue Framework 1.6.0:
+    players open the book and see where they stand with every character.
+  - **A Reputation tab** for the settings that cover your whole server: the
+    standing page's tab name, heading and column names, and whether players
+    get a pop-up naming who a choice pleased or annoyed.
+  - **An icon on each rank:** a pleased, straight or angry face, a thumb up,
+    sideways or down, or none. Picked separately from the rank's wording.
+  - **Reputation for finishing a quest**, on the Quest wording tab. Pick the
+    characters and how far their standing moves.
+- **Fonts.**
+  - **Font and Text size are separate pickers** on the Menu appearance tab,
+    so any font works at any size. Older files open on the matching pair.
+  - **Thirteen fonts:** DayZ's own six, plus Inter, EB Garamond and Noto
+    Serif, which cover Russian, and Condensed Sans, Zilla Slab, Special Elite
+    and Black Ops One, which don't. The dropdown says which.
+- **Scroll speed** on the Menu appearance tab, from 0.25 to 4.0. Players can
+  set their own in game, and theirs wins.
+- **Russian and German, in full:** every tab, hint, pop-up and font
+  description. The Russian began as a contribution from **ave-ladan**.
+  - For translators, `tools/translations.py` lists what's missing and refuses
+    a translation that would break the editor. See
+    [docs/TRANSLATING.md](docs/TRANSLATING.md).
+
+### Fixed
+- **Saving some tabs could wipe that file's settings.** When Forge started
+  with your folder already remembered, Menu appearance, Reputation, Global AI
+  settings, Factions and AI patrols opened on defaults, and saving one
+  overwrote the file. They now load at startup, and Forge asks before saving
+  over a file it hasn't loaded or that has changed since.
+- **AI patrol conversations are no longer flagged as misfiled.**
+- **The Import tab's main list opens at a usable height**, and keeps the size
+  you drag it to.
+- **"Live preview" is no longer cut off in Russian**, and translated tab names
+  are no longer narrower than the rest.
 
 ---
 

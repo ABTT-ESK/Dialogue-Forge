@@ -1,10 +1,13 @@
 import json
 import os
+import sys
 import re
 import copy
+import shutil
 import uuid
 import webbrowser
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, colorchooser, simpledialog
 
 try:
@@ -12,7 +15,7 @@ try:
 except Exception:
     SpellChecker = None
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 APP_TITLE = "DialogueForge - DayZ Dialogue Framework config editor"
 SETTINGS_FILE = os.path.join(
     os.path.expanduser("~"), ".dialogueforge_settings.json")
@@ -50,22 +53,69 @@ ACTION_HELP = {
 
 NODE_TYPES = ["STANDARD", "QUEST_LIST", "QUEST_DETAIL"]
 
-# The game's JSON reader stops at 1023 bytes per line (a 1024 buffer minus its
-# terminator). Measured in game, not guessed: lines authored at 1223, 1711,
-# 2008 and 2269 bytes all arrived as exactly 1023.
-#
-# It is a BYTE limit, so it is not 1023 letters. A plain English letter is one
-# byte, a Russian one is two, a Chinese one is three - about 1000 English
-# characters, 500 Russian, or 340 Chinese. The mod cannot warn about this
-# itself (by the time it reads the file the text is already cut), so the
-# editor is the only place that can catch it before players do.
+# The game's JSON reader keeps 1023 bytes of any one string -- measured in
+# game: lines of 1223 to 2269 bytes all arrived as 1023. Bytes, not letters:
+# Russian takes two a letter, Chinese three. Response options must still fit.
 LINE_BYTES_LIMIT = 1023
 LINE_BYTES_CLOSE = 900
-TRANSLATION_RISK_CHARS = LINE_BYTES_LIMIT // 2
+
+# Since 1.6.0 a spoken line or translation past that is saved in pieces the
+# mod joins back up. Measured as written in the file (\n and \" cost two),
+# with room to spare under 1023.
+LINE_PIECE_BYTES = 1000
+
+
+def written_bytes(text):
+    """How many bytes a string takes as written inside a JSON file."""
+    return len(json.dumps(text or "", ensure_ascii=False)[1:-1].encode("utf-8"))
+
+
+def join_long_text(first, more):
+    """One line again, out of the pieces a file holds it in."""
+    if not more:
+        return first or ""
+
+    return (first or "") + "".join(str(piece) for piece in more)
+
+
+def split_long_text(text, limit=LINE_PIECE_BYTES):
+    """(first, [rest]) - pieces the game's reader can take whole.
+
+    Joined back together they are exactly `text` again. A piece ends at the
+    last space that fits, so it breaks between words, and never inside a
+    character.
+    """
+    raw = text or ""
+    if written_bytes(raw) <= limit:
+        return raw, []
+
+    pieces = []
+    rest = raw
+    while written_bytes(rest) > limit:
+        #! The longest start of `rest` that fits. Bytes only grow as
+        #! characters are added, so halving finds it.
+        cut, over = 0, len(rest)
+        while over - cut > 1:
+            middle = (cut + over) // 2
+            if written_bytes(rest[:middle]) <= limit:
+                cut = middle
+            else:
+                over = middle
+
+        space = rest.rfind(" ", 0, cut)
+        if space >= cut // 2:
+            cut = space + 1
+
+        pieces.append(rest[:cut])
+        rest = rest[cut:]
+
+    pieces.append(rest)
+    return pieces[0], pieces[1:]
 
 
 def line_length_warning(text, where):
-    """Flag a line the game will cut, or one a translation would push over."""
+    """Flag a line the game will cut. For text the mod reads whole: options,
+    quest wording, a tree's own captions. Translations of them are split."""
     raw = text or ""
     if not raw.strip():
         return None
@@ -73,18 +123,39 @@ def line_length_warning(text, where):
     nchars = len(raw)
     if nbytes >= LINE_BYTES_LIMIT:
         return ("%s is %d bytes (%d characters). The game only reads %d bytes "
-                "of a line, so this WILL be cut off - shorten it or split it "
-                "across several nodes."
+                "of it, so this WILL be cut off - shorten it."
                 % (where, nbytes, nchars, LINE_BYTES_LIMIT))
     if nbytes >= LINE_BYTES_CLOSE:
         return ("%s is %d bytes (%d characters), close to the %d-byte limit "
                 "the game reads. A little more and it will be cut off."
                 % (where, nbytes, nchars, LINE_BYTES_LIMIT))
-    if nchars >= TRANSLATION_RISK_CHARS:
-        return ("%s is %d characters. That fits in English, but a Russian "
-                "translation would take about twice the room and be cut off "
-                "at the game's %d-byte limit."
-                % (where, nchars, LINE_BYTES_LIMIT))
+    return None
+
+
+def list_length_warnings(data, lists, prefix):
+    """line_length_warning over each (field, label) text list of a record."""
+    found = []
+    for field, label in lists:
+        for index, text in enumerate(data.get(field) or []):
+            warning = line_length_warning(
+                str(text), "%s%s %d" % (prefix, label, index + 1))
+            if warning:
+                found.append(warning)
+    return found
+
+
+def piece_line_warning(text, more, where,
+                       fix="Open and save the file in DialogueForge, which "
+                           "stores a long line in pieces the game joins back "
+                           "together."):
+    """Only a piece over the limit on its own is a problem -- a file written
+    by hand or before 1.6.0. Checks every piece, like the mod does."""
+    for piece in [text] + list(more or []):
+        nbytes = len(str(piece or "").encode("utf-8"))
+        if nbytes >= LINE_BYTES_LIMIT:
+            return ("%s is %d bytes in one piece. The game only reads %d "
+                    "bytes of a piece, so this WILL be cut off. %s"
+                    % (where, nbytes, LINE_BYTES_LIMIT, fix))
     return None
 
 
@@ -108,19 +179,99 @@ NO_ACTION_QUEST_LABEL = "(none)"
 
 OVERRIDE_NONE_LABEL = "No override"
 
-FONT_STYLES = [
-    ("DEFAULT", "Metron Book, standard sizes"),
+#! Must stay in step with DialogueMenuFont in the mod and with the FONTS
+#! table in its tools/gen_layout_variants.py -- a name here with no layout
+#! behind it leaves the window in Metron Book with nothing to say why.
+FONTS = [
+    ("DEFAULT", "Metron Book - what DayZ uses everywhere"),
     ("LIGHT", "Metron Light - thinner, less shouty"),
-    ("LARGE", "Metron Book at 120% - easier at distance or on a TV"),
-    ("COMPACT", "Metron Book at 85% - more options without scrolling"),
+    ("BLACK", "Metron Black - heavy, reads at a distance"),
+    ("METRON", "Metron - the plain weight, a touch wider"),
+    ("SERIF", "Amor Serif - a book face, for lore-heavy servers"),
+    ("ETELKA", "Etelka Text - what Expansion's own menus use"),
+    ("BLACKOPS", "Black Ops One - military stencil. No Russian"),
+    ("INTER", "Inter - clean modern sans. Covers Russian"),
+    ("GARAMOND", "EB Garamond - classic book serif. Covers Russian"),
+    ("NOTOSERIF", "Noto Serif - sturdy, readable serif. Covers Russian"),
+    ("CONDENSED", "Condensed Sans - tall and narrow. No Russian"),
+    ("ZILLA", "Zilla Slab - chunky slab serif. No Russian"),
+    ("TYPEWRITER", "Special Elite - worn typewriter. No Russian"),
 ]
 
-FONT_STYLE_PREVIEW = {
-    "DEFAULT": (1.0, True),
-    "LIGHT": (1.0, False),
-    "LARGE": (1.2, True),
-    "COMPACT": (0.85, True),
+TEXT_SIZES = [
+    ("NORMAL", "The size the window was designed at"),
+    ("LARGE", "Bigger - easier at distance or on a TV"),
+    ("COMPACT", "Smaller - more options without scrolling"),
+]
+
+#! What the preview draws for each one: how much to scale the text, and
+#! whether the speaker's name reads bold. Only a rough stand-in -- the real
+#! typeface comes from a layout the preview cannot load.
+FONT_PREVIEW = {
+    "DEFAULT": True,
+    "LIGHT": False,
+    "BLACK": True,
+    "METRON": False,
+    "SERIF": False,
+    "ETELKA": False,
+    "BLACKOPS": True,
+    "INTER": False,
+    "GARAMOND": False,
+    "NOTOSERIF": False,
+    "CONDENSED": True,
+    "ZILLA": True,
+    "TYPEWRITER": False,
 }
+
+TEXT_SIZE_PREVIEW = {
+    "NORMAL": 1.0,
+    "LARGE": 1.2,
+    "COMPACT": 0.85,
+}
+
+#! What an old FontStyle meant, for a file written before the two were split.
+LEGACY_FONT_STYLES = {
+    "DEFAULT": ("DEFAULT", "NORMAL"),
+    "LIGHT": ("LIGHT", "NORMAL"),
+    "LARGE": ("DEFAULT", "LARGE"),
+    "COMPACT": ("DEFAULT", "COMPACT"),
+}
+
+
+def font_and_size(data):
+    """The typeface and size a menu config asks for.
+
+    Font and TextSize win when they are there. A file written before they
+    existed only has FontStyle, which meant one or the other, so it is
+    unpacked into both -- the same fold the mod does on its first load.
+    """
+    font = str(data.get("Font", "") or "").upper()
+    size = str(data.get("TextSize", "") or "").upper()
+
+    if font in dict(FONTS) and size in dict(TEXT_SIZES):
+        return font, size
+
+    style = str(data.get("FontStyle", "DEFAULT") or "DEFAULT").upper()
+    was = LEGACY_FONT_STYLES.get(style, ("DEFAULT", "NORMAL"))
+
+    if font not in dict(FONTS):
+        font = was[0]
+    if size not in dict(TEXT_SIZES):
+        size = was[1]
+    return font, size
+
+
+def legacy_font_style(font, size):
+    """The nearest old FontStyle to a font and size, so the field an older
+    build reads still says something sensible. A typeface that did not exist
+    back then has no equivalent, so the size is what carries over."""
+    if size == "LARGE":
+        return "LARGE"
+    if size == "COMPACT":
+        return "COMPACT"
+    if font == "LIGHT":
+        return "LIGHT"
+    return "DEFAULT"
 
 POSITIONS = [
     "TOP_LEFT", "TOP_CENTER", "TOP_RIGHT",
@@ -385,10 +536,19 @@ def default_menu_config():
     cfg["WindowBorderThickness"] = 2
     cfg["VisitedResponseOpacity"] = 0.4
     cfg["FontStyle"] = "DEFAULT"
+    cfg["Font"] = "DEFAULT"
+    cfg["TextSize"] = "NORMAL"
     cfg["ShowResponseIcons"] = False
     cfg["ShowLanguageButton"] = True
     cfg["ScaleTextWithPanel"] = False
     cfg["ShowErrorNotifications"] = True
+    cfg["ScrollSpeed"] = 1.0
+    cfg["ShowReputationNotifications"] = True
+    cfg["BookTabName"] = ""
+    cfg["BookPageTitle"] = ""
+    cfg["BookColumnName"] = ""
+    cfg["BookColumnStatus"] = ""
+    cfg["BookColumnReputation"] = ""
     cfg["LayoutOverride"] = ""
     return cfg
 
@@ -432,6 +592,7 @@ def new_tree():
         "AIPatrolID": 0,
         "AIPatrolSubID": 0,
         "ReputationVar": "",
+        "ReputationMax": 0,
         "ReputationTiers": [],
         "RootNodeID": 1,
         "GreetingVoiceLineIDs": [],
@@ -467,6 +628,7 @@ def new_quest_entry(quest_id=1):
         "InProgressBackTexts": [],
         "TurnInBackTexts": [],
         "RewardSelectText": "",
+        "RepOnComplete": [],
     }
 
 
@@ -568,13 +730,15 @@ def loc_node_entries(nodes, stage_index, where_prefix):
         node_id = safe_int(node.get("ID", 1), 1)
         where = "%sNode %d" % (where_prefix, node_id)
 
-        speaker = node.get("SpeakerText", "") or ""
+        #! Joined: a tree straight from build_output holds long lines in pieces.
+        speaker = join_long_text(node.get("SpeakerText", ""),
+                                 node.get("SpeakerTextMore"))
         if speaker.strip():
             entries.append((prefix + "node.%d.SpeakerText" % node_id,
                             speaker, where + "  -  spoken line"))
 
         for index, line in enumerate(node.get("SpeakerLines") or []):
-            text = line.get("Text", "") or ""
+            text = join_long_text(line.get("Text", ""), line.get("TextMore"))
             if text.strip():
                 entries.append(
                     (prefix + "node.%d.SpeakerLines.%d" % (node_id, index),
@@ -661,472 +825,16 @@ def loc_relative_tree_path(profile_root, tree_path):
 #! itself. Nothing in the layout code has to know about languages, and an
 #! untranslated string simply stays English.
 
-#! Keyed by the English string exactly as it appears in the layout code.
-#! This covers the chrome -- tabs, toolbar, folder pickers. Everything else
-#! falls back to English until someone fills in the template written by
-#! "Export interface template..." on the Translations tab.
-UI_TRANSLATIONS = {
-    "czech": {
-        "  Dialogue  ": "  Dialog  ",
-        "  Quest wording  ": "  Text úkolů  ",
-        "  Translations  ": "  Překlady  ",
-        "  Menu appearance  ": "  Vzhled okna  ",
-        "  Global AI settings  ": "  Globální AI  ",
-        "  Factions  ": "  Frakce  ",
-        "  AI patrols  ": "  AI hlídky  ",
-        "  Server files  ": "  Soubory serveru  ",
-        "New (blank)": "Nový (prázdný)",
-        "Open file...": "Otevřít soubor...",
-        "Save": "Uložit",
-        "Save as / copy to...": "Uložit jako / kopírovat...",
-        "Check this tab": "Zkontrolovat záložku",
-        "Check ALL config files": "Zkontrolovat VŠE",
-        "Browse...": "Procházet...",
-        "Live preview": "Živý náhled",
-        "Dark mode": "Tmavý režim",
-        "Light mode": "Světlý režim",
-        "Ready": "Připraveno",
-        "Translate into": "Přeložit do",
-        "Load what's on disk": "Načíst z disku",
-        "Pull latest text": "Načíst aktuální text",
-        "Original": "Originál",
-        "Translation": "Překlad",
-        "Apply": "Použít",
-        "Copy the original across": "Zkopírovat originál",
-        "Next one missing": "Další chybějící",
-        "Only show lines still missing": "Zobrazit jen chybějící",
-        "Export interface template...": "Exportovat šablonu rozhraní...",
-    },
-    "german": {
-        "  Dialogue  ": "  Dialog  ",
-        "  Quest wording  ": "  Quest-Texte  ",
-        "  Translations  ": "  Übersetzungen  ",
-        "  Menu appearance  ": "  Fenster-Design  ",
-        "  Global AI settings  ": "  Globale KI  ",
-        "  Factions  ": "  Fraktionen  ",
-        "  AI patrols  ": "  KI-Patrouillen  ",
-        "  Server files  ": "  Server-Dateien  ",
-        "New (blank)": "Neu (leer)",
-        "Open file...": "Datei öffnen...",
-        "Save": "Speichern",
-        "Save as / copy to...": "Speichern unter / kopieren...",
-        "Check this tab": "Diesen Tab prüfen",
-        "Check ALL config files": "ALLE Dateien prüfen",
-        "Browse...": "Durchsuchen...",
-        "Live preview": "Live-Vorschau",
-        "Dark mode": "Dunkler Modus",
-        "Light mode": "Heller Modus",
-        "Ready": "Bereit",
-        "Translate into": "Übersetzen nach",
-        "Load what's on disk": "Von der Festplatte laden",
-        "Pull latest text": "Aktuellen Text holen",
-        "Original": "Original",
-        "Translation": "Übersetzung",
-        "Apply": "Übernehmen",
-        "Copy the original across": "Original übernehmen",
-        "Next one missing": "Nächste fehlende",
-        "Only show lines still missing": "Nur fehlende anzeigen",
-        "Export interface template...": "Oberflächen-Vorlage exportieren...",
-    },
-    "russian": {
-        "  Dialogue  ": "  Диалог  ",
-        "  Quest wording  ": "  Тексты заданий  ",
-        "  Translations  ": "  Переводы  ",
-        "  Menu appearance  ": "  Вид окна  ",
-        "  Global AI settings  ": "  Общие настройки ИИ  ",
-        "  Factions  ": "  Фракции  ",
-        "  AI patrols  ": "  Патрули ИИ  ",
-        "  Server files  ": "  Файлы сервера  ",
-        "New (blank)": "Создать (пустой)",
-        "Open file...": "Открыть файл...",
-        "Save": "Сохранить",
-        "Save as / copy to...": "Сохранить как / копировать...",
-        "Check this tab": "Проверить вкладку",
-        "Check ALL config files": "Проверить всё",
-        "Browse...": "Обзор...",
-        "Live preview": "Живой просмотр",
-        "Dark mode": "Тёмная тема",
-        "Light mode": "Светлая тема",
-        "Ready": "Готово",
-        "Translate into": "Перевести на",
-        "Load what's on disk": "Загрузить с диска",
-        "Pull latest text": "Обновить текст",
-        "Original": "Оригинал",
-        "Translation": "Перевод",
-        "Apply": "Применить",
-        "Copy the original across": "Скопировать оригинал",
-        "Next one missing": "Следующая непереведённая",
-        "Only show lines still missing": "Только непереведённые",
-        "Export interface template...": "Экспорт шаблона интерфейса...",
-        "Editing": "Редактирование",
-        "  Who it's for & voice lines  ": "Для кого и голосовые линии",
-        "  Quest talk  ": "Текст квестов",
-        "  Flow  ": "Схема",
-        "Type": "Тип",
-        "STANDARD": "СТАНДАРТНЫЙ",
-        "What the NPC says here:": "Что говорит NPC здесь:",
-        "Selected player option": "Выбранный вариант игрока",
-        "Add option": "Добавить вариант",
-        "Duplicate": "Дублировать",
-        "Delete": "Удалить",
-        "Button text": "Текст кнопки",
-        "Quest to use": "Квест для использования",
-        "Browse quests...": "Обзор квестов...",
-        "Next node": "Следующий узел",
-        "Add node": "Добавить узел",
-        "Delete node": "Удалить узел",
-        "Conversation opens on node": "Разговор начинается с узла",
-        "This tree unlocks after quest": "Это дерево открывается после квеста",
-        "Jump to": "Перейти к",
-        "Conversation outline": "Схема разговора",
-        "Node / player option": "Узел / вариант игрока",
-        "Leads to": "Переход к",
-        "Quests in this file": "Квесты в этом файле",
-        "Add quest": "Добавить квест",
-        "Expansion quest": "Квест Expansion",
-        "On offer": "При предложении",
-        "On turn-in": "При сдаче",
-        "Reward choice screen": "Экран выбора награды",
-        "Quest list screen": "Экран списка квестов",
-        "Offer screen  (optional)": "Экран предложения  (необязательно)",
-        "In-progress screen  (optional)": "Экран выполнения  (необязательно)",
-        "Turn-in screen  (optional)": "Экран сдачи  (необязательно)",
-        "No-quests screen": "Экран без квестов",
-        "Placement": "Расположение",
-        "Screen position": "Позиция на экране",
-        "Panel width": "Ширина панели",
-        "Panel height": "Высота панели",
-        "Nudge left / right": "Сдвиг влево / вправо",
-        "Nudge up / down": "Сдвиг вверх / вниз",
-        "Edge margin": "Отступ от края",
-        "Already-picked fade": "Затухание выбранных",
-        "Colours": "Цвета",
-        "Preset": "Предустановка",
-        "Text": "Текст",
-        "Font style": "Стиль шрифта",
-        "Hint icons on buttons": "Значки-подсказки на кнопках",
-        "Let players pick their language": "Разрешить игрокам выбирать язык",
-        "Option text scales with panel size": "Текст опций масштабируется под размер панели",
-        "Tell players on screen when an option is misconfigured": "Сообщать игроку на экране об ошибках",
-        "Custom layout (advanced)": "Пользовательский макет (расширенно)",
-        "dies": "умирает",
-        "puts their weapon away": "убирает оружие",
-        "puts their hands up (surrender)": "поднимает руки (сдаётся)",
-        "leaves the area": "покидает зону",
-        "Leave-area distance (m)": "Дистанция покидания зоны (м)",
-        "     Check every (seconds)": "Проверять каждые (секунд)",
-        "Threshold": "Порог",
-        "Remembered by": "Запоминается для",
-        "Save global AI settings": "Сохранить настройки ИИ",
-        "Factions": "Фракции",
-        "New": "Новая",
-        "Remove": "Удалить",
-        "Selected faction": "Выбранная фракция",
-        "Name": "Название",
-        "Loadout": "Экипировка",
-        "Toward players": "По отношению к игрокам",
-        "Won't fight these factions": "Не будет сражаться с этими фракциями",
-        "Save factions": "Сохранить фракции",
-        "Patrols": "Патрули",
-        "Identity & dialogue link": "Идентификатор и связь с диалогом",
-        "Dialogue ID": "ID диалога",
-        "Spawning": "Появление",
-        "Movement & formation": "Движение и построение",
-        "Spawn area": "Зона появления",
-        "Waypoints": "Точки пути",
-        "Permanent hostility for this patrol": "Постоянная враждебность для этого патруля",
-        "Save AI patrols": "Сохранить патрули ИИ",
-        "New patrol": "Новый патруль",
-        "Faction": "Фракция",
-        "Behaviour": "Поведение",
-        "Speed": "Скорость",
-        "Formation": "Построение",
-        "Default stance": "Стойка по умолчанию",
-        "Rescan folder": "Обновить папку",
-        "Create folder structure": "Создать структуру папок",
-        "Open LoadLog.txt": "Открыть LoadLog.txt",
-        "Quest flow report": "Отчёт по квестам",
-    },
-    "polish": {
-        "  Dialogue  ": "  Dialog  ",
-        "  Quest wording  ": "  Teksty zadań  ",
-        "  Translations  ": "  Tłumaczenia  ",
-        "  Menu appearance  ": "  Wygląd okna  ",
-        "  Global AI settings  ": "  Globalne AI  ",
-        "  Factions  ": "  Frakcje  ",
-        "  AI patrols  ": "  Patrole AI  ",
-        "  Server files  ": "  Pliki serwera  ",
-        "New (blank)": "Nowy (pusty)",
-        "Open file...": "Otwórz plik...",
-        "Save": "Zapisz",
-        "Save as / copy to...": "Zapisz jako / kopiuj...",
-        "Check this tab": "Sprawdź tę kartę",
-        "Check ALL config files": "Sprawdź WSZYSTKO",
-        "Browse...": "Przeglądaj...",
-        "Live preview": "Podgląd na żywo",
-        "Dark mode": "Tryb ciemny",
-        "Light mode": "Tryb jasny",
-        "Ready": "Gotowe",
-        "Translate into": "Przetłumacz na",
-        "Load what's on disk": "Wczytaj z dysku",
-        "Pull latest text": "Pobierz aktualny tekst",
-        "Original": "Oryginał",
-        "Translation": "Tłumaczenie",
-        "Apply": "Zastosuj",
-        "Copy the original across": "Skopiuj oryginał",
-        "Next one missing": "Następne brakujące",
-        "Only show lines still missing": "Pokaż tylko brakujące",
-        "Export interface template...": "Eksportuj szablon interfejsu...",
-    },
-    "hungarian": {
-        "  Dialogue  ": "  Párbeszéd  ",
-        "  Quest wording  ": "  Küldetésszöveg  ",
-        "  Translations  ": "  Fordítások  ",
-        "  Menu appearance  ": "  Ablak megjelenés  ",
-        "  Global AI settings  ": "  Globális MI  ",
-        "  Factions  ": "  Frakciók  ",
-        "  AI patrols  ": "  MI járőrök  ",
-        "  Server files  ": "  Szerverfájlok  ",
-        "New (blank)": "Új (üres)",
-        "Open file...": "Fájl megnyitása...",
-        "Save": "Mentés",
-        "Save as / copy to...": "Mentés másként / másolás...",
-        "Check this tab": "Fül ellenőrzése",
-        "Check ALL config files": "MINDEN fájl ellenőrzése",
-        "Browse...": "Tallózás...",
-        "Live preview": "Élő előnézet",
-        "Dark mode": "Sötét mód",
-        "Light mode": "Világos mód",
-        "Ready": "Kész",
-        "Translate into": "Fordítás erre",
-        "Load what's on disk": "Betöltés lemezről",
-        "Pull latest text": "Friss szöveg betöltése",
-        "Original": "Eredeti",
-        "Translation": "Fordítás",
-        "Apply": "Alkalmaz",
-        "Copy the original across": "Eredeti átmásolása",
-        "Next one missing": "Következő hiányzó",
-        "Only show lines still missing": "Csak a hiányzók",
-        "Export interface template...": "Felület-sablon exportálása...",
-    },
-    "italian": {
-        "  Dialogue  ": "  Dialogo  ",
-        "  Quest wording  ": "  Testi missioni  ",
-        "  Translations  ": "  Traduzioni  ",
-        "  Menu appearance  ": "  Aspetto finestra  ",
-        "  Global AI settings  ": "  IA globale  ",
-        "  Factions  ": "  Fazioni  ",
-        "  AI patrols  ": "  Pattuglie IA  ",
-        "  Server files  ": "  File del server  ",
-        "New (blank)": "Nuovo (vuoto)",
-        "Open file...": "Apri file...",
-        "Save": "Salva",
-        "Save as / copy to...": "Salva come / copia in...",
-        "Check this tab": "Controlla questa scheda",
-        "Check ALL config files": "Controlla TUTTO",
-        "Browse...": "Sfoglia...",
-        "Live preview": "Anteprima dal vivo",
-        "Dark mode": "Tema scuro",
-        "Light mode": "Tema chiaro",
-        "Ready": "Pronto",
-        "Translate into": "Traduci in",
-        "Load what's on disk": "Carica dal disco",
-        "Pull latest text": "Aggiorna il testo",
-        "Original": "Originale",
-        "Translation": "Traduzione",
-        "Apply": "Applica",
-        "Copy the original across": "Copia l'originale",
-        "Next one missing": "Prossima mancante",
-        "Only show lines still missing": "Mostra solo le mancanti",
-        "Export interface template...": "Esporta modello interfaccia...",
-    },
-    "spanish": {
-        "  Dialogue  ": "  Diálogo  ",
-        "  Quest wording  ": "  Textos de misión  ",
-        "  Translations  ": "  Traducciones  ",
-        "  Menu appearance  ": "  Aspecto de ventana  ",
-        "  Global AI settings  ": "  IA global  ",
-        "  Factions  ": "  Facciones  ",
-        "  AI patrols  ": "  Patrullas IA  ",
-        "  Server files  ": "  Archivos del servidor  ",
-        "New (blank)": "Nuevo (vacío)",
-        "Open file...": "Abrir archivo...",
-        "Save": "Guardar",
-        "Save as / copy to...": "Guardar como / copiar a...",
-        "Check this tab": "Revisar esta pestaña",
-        "Check ALL config files": "Revisar TODO",
-        "Browse...": "Examinar...",
-        "Live preview": "Vista previa",
-        "Dark mode": "Modo oscuro",
-        "Light mode": "Modo claro",
-        "Ready": "Listo",
-        "Translate into": "Traducir a",
-        "Load what's on disk": "Cargar desde el disco",
-        "Pull latest text": "Traer el texto actual",
-        "Original": "Original",
-        "Translation": "Traducción",
-        "Apply": "Aplicar",
-        "Copy the original across": "Copiar el original",
-        "Next one missing": "Siguiente sin traducir",
-        "Only show lines still missing": "Solo las que faltan",
-        "Export interface template...": "Exportar plantilla de interfaz...",
-    },
-    "french": {
-        "  Dialogue  ": "  Dialogue  ",
-        "  Quest wording  ": "  Textes de quête  ",
-        "  Translations  ": "  Traductions  ",
-        "  Menu appearance  ": "  Apparence  ",
-        "  Global AI settings  ": "  IA globale  ",
-        "  Factions  ": "  Factions  ",
-        "  AI patrols  ": "  Patrouilles IA  ",
-        "  Server files  ": "  Fichiers serveur  ",
-        "New (blank)": "Nouveau (vide)",
-        "Open file...": "Ouvrir un fichier...",
-        "Save": "Enregistrer",
-        "Save as / copy to...": "Enregistrer sous / copier...",
-        "Check this tab": "Vérifier cet onglet",
-        "Check ALL config files": "TOUT vérifier",
-        "Browse...": "Parcourir...",
-        "Live preview": "Aperçu en direct",
-        "Dark mode": "Mode sombre",
-        "Light mode": "Mode clair",
-        "Ready": "Prêt",
-        "Translate into": "Traduire vers",
-        "Load what's on disk": "Charger depuis le disque",
-        "Pull latest text": "Récupérer le texte",
-        "Original": "Original",
-        "Translation": "Traduction",
-        "Apply": "Appliquer",
-        "Copy the original across": "Copier l'original",
-        "Next one missing": "Suivante non traduite",
-        "Only show lines still missing": "Afficher seulement les manquantes",
-        "Export interface template...": "Exporter le modèle d'interface...",
-    },
-    "chinese": {
-        "  Dialogue  ": "  對話  ",
-        "  Quest wording  ": "  任務文字  ",
-        "  Translations  ": "  翻譯  ",
-        "  Menu appearance  ": "  視窗外觀  ",
-        "  Global AI settings  ": "  全域 AI  ",
-        "  Factions  ": "  陣營  ",
-        "  AI patrols  ": "  AI 巡邏  ",
-        "  Server files  ": "  伺服器檔案  ",
-        "New (blank)": "新建（空白）",
-        "Open file...": "開啟檔案...",
-        "Save": "儲存",
-        "Save as / copy to...": "另存為 / 複製到...",
-        "Check this tab": "檢查此分頁",
-        "Check ALL config files": "檢查全部設定檔",
-        "Browse...": "瀏覽...",
-        "Live preview": "即時預覽",
-        "Dark mode": "深色模式",
-        "Light mode": "淺色模式",
-        "Ready": "就緒",
-        "Translate into": "翻譯成",
-        "Load what's on disk": "從磁碟載入",
-        "Pull latest text": "取得最新文字",
-        "Original": "原文",
-        "Translation": "翻譯",
-        "Apply": "套用",
-        "Copy the original across": "複製原文",
-        "Next one missing": "下一個未翻譯",
-        "Only show lines still missing": "只顯示未翻譯",
-        "Export interface template...": "匯出介面範本...",
-    },
-    "japanese": {
-        "  Dialogue  ": "  会話  ",
-        "  Quest wording  ": "  クエスト文  ",
-        "  Translations  ": "  翻訳  ",
-        "  Menu appearance  ": "  ウィンドウ外観  ",
-        "  Global AI settings  ": "  AI 全体設定  ",
-        "  Factions  ": "  勢力  ",
-        "  AI patrols  ": "  AI パトロール  ",
-        "  Server files  ": "  サーバーファイル  ",
-        "New (blank)": "新規（空）",
-        "Open file...": "ファイルを開く...",
-        "Save": "保存",
-        "Save as / copy to...": "名前を付けて保存 / コピー...",
-        "Check this tab": "このタブを確認",
-        "Check ALL config files": "すべての設定を確認",
-        "Browse...": "参照...",
-        "Live preview": "ライブプレビュー",
-        "Dark mode": "ダークモード",
-        "Light mode": "ライトモード",
-        "Ready": "準備完了",
-        "Translate into": "翻訳先",
-        "Load what's on disk": "ディスクから読み込む",
-        "Pull latest text": "最新のテキストを取得",
-        "Original": "原文",
-        "Translation": "翻訳",
-        "Apply": "適用",
-        "Copy the original across": "原文をコピー",
-        "Next one missing": "次の未翻訳",
-        "Only show lines still missing": "未翻訳のみ表示",
-        "Export interface template...": "UI テンプレートを書き出す...",
-    },
-    "portuguese": {
-        "  Dialogue  ": "  Diálogo  ",
-        "  Quest wording  ": "  Textos de missão  ",
-        "  Translations  ": "  Traduções  ",
-        "  Menu appearance  ": "  Aparência da janela  ",
-        "  Global AI settings  ": "  IA global  ",
-        "  Factions  ": "  Facções  ",
-        "  AI patrols  ": "  Patrulhas de IA  ",
-        "  Server files  ": "  Ficheiros do servidor  ",
-        "New (blank)": "Novo (vazio)",
-        "Open file...": "Abrir ficheiro...",
-        "Save": "Guardar",
-        "Save as / copy to...": "Guardar como / copiar para...",
-        "Check this tab": "Verificar este separador",
-        "Check ALL config files": "Verificar TUDO",
-        "Browse...": "Procurar...",
-        "Live preview": "Pré-visualização",
-        "Dark mode": "Modo escuro",
-        "Light mode": "Modo claro",
-        "Ready": "Pronto",
-        "Translate into": "Traduzir para",
-        "Load what's on disk": "Carregar do disco",
-        "Pull latest text": "Obter o texto atual",
-        "Original": "Original",
-        "Translation": "Tradução",
-        "Apply": "Aplicar",
-        "Copy the original across": "Copiar o original",
-        "Next one missing": "Próxima em falta",
-        "Only show lines still missing": "Mostrar só as que faltam",
-        "Export interface template...": "Exportar modelo da interface...",
-    },
-    "chinesesimp": {
-        "  Dialogue  ": "  对话  ",
-        "  Quest wording  ": "  任务文本  ",
-        "  Translations  ": "  翻译  ",
-        "  Menu appearance  ": "  窗口外观  ",
-        "  Global AI settings  ": "  全局 AI  ",
-        "  Factions  ": "  阵营  ",
-        "  AI patrols  ": "  AI 巡逻  ",
-        "  Server files  ": "  服务器文件  ",
-        "New (blank)": "新建（空白）",
-        "Open file...": "打开文件...",
-        "Save": "保存",
-        "Save as / copy to...": "另存为 / 复制到...",
-        "Check this tab": "检查此标签页",
-        "Check ALL config files": "检查全部配置文件",
-        "Browse...": "浏览...",
-        "Live preview": "实时预览",
-        "Dark mode": "深色模式",
-        "Light mode": "浅色模式",
-        "Ready": "就绪",
-        "Translate into": "翻译为",
-        "Load what's on disk": "从磁盘加载",
-        "Pull latest text": "获取最新文本",
-        "Original": "原文",
-        "Translation": "翻译",
-        "Apply": "应用",
-        "Copy the original across": "复制原文",
-        "Next one missing": "下一个未翻译",
-        "Only show lines still missing": "仅显示未翻译",
-        "Export interface template...": "导出界面模板...",
-    },
-}
+#! Translations live in forge_locales.py, keyed by the English string exactly
+#! as the layout code writes it. Look for it beside this file: imported some
+#! other way, that folder is off the path and every language vanishes silently.
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    from forge_locales import UI_TRANSLATIONS
+except ImportError:
+    UI_TRANSLATIONS = {}
 
 _UI_STATE = {"code": "english", "map": {}, "seen": set()}
 
@@ -1349,6 +1057,17 @@ def write_json(path, data):
         os.makedirs(folder)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=4, ensure_ascii=False)
+
+
+def file_stamp(path):
+    """Which file, as it was: path, modification time and size. Two stamps
+    that differ mean the file was never read, or has changed since."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return (os.path.normcase(os.path.abspath(path)), info.st_mtime_ns,
+            info.st_size)
 
 
 def add_entry_undo(entry):
@@ -1859,8 +1578,23 @@ class VarOpEditor(ttk.Frame):
         self._loading = False
 
 
+#! The faces the mod ships. The word a rank is called and the face it shows
+#! are picked separately on purpose: a server calling its top rank "Cool" and
+#! its bottom one "Pissed" still gets the pleased and angry faces.
+REP_ICONS = [
+    ("", "no icon"),
+    ("HAPPY", "happy face"),
+    ("NEUTRAL", "straight face"),
+    ("ANGRY", "angry face"),
+    ("THUMBUP", "thumb up"),
+    ("THUMBSIDE", "thumb sideways"),
+    ("THUMBDOWN", "thumb down"),
+]
+REP_ICON_LABELS = dict(REP_ICONS)
+
+
 class RepTierEditor(ttk.Frame):
-    """Rows of 'at N or more, show <label>' for the reputation marker."""
+    """Rows of 'at N or more, show <label> <face>' for the reputation marker."""
 
     def __init__(self, master, on_change=None):
         ttk.Frame.__init__(self, master)
@@ -1876,7 +1610,7 @@ class RepTierEditor(ttk.Frame):
         if self.on_change and not self._loading:
             self.on_change()
 
-    def add_row(self, threshold=0, label=""):
+    def add_row(self, threshold=0, label="", icon=""):
         row = ttk.Frame(self.rows_frame)
         row.pack(fill="x", pady=1)
         ttk.Label(row, text="At").pack(side="left")
@@ -1891,7 +1625,15 @@ class RepTierEditor(ttk.Frame):
         lab.insert(0, label)
         lab.pack(side="left", padx=4)
         lab.bind("<KeyRelease>", lambda _e: self._fire())
-        entry = {"frame": row, "threshold": t, "label": lab}
+
+        ttk.Label(row, text="with").pack(side="left")
+        face = ttk.Combobox(row, width=16, state="readonly",
+                            values=[text for _value, text in REP_ICONS])
+        face.set(REP_ICON_LABELS.get(str(icon or "").upper(), "no icon"))
+        face.pack(side="left", padx=4)
+        face.bind("<<ComboboxSelected>>", lambda _e: self._fire())
+
+        entry = {"frame": row, "threshold": t, "label": lab, "icon": face}
         ttk.Button(row, text="×", width=3,
                    command=lambda: self._remove(entry)).pack(
             side="left", padx=(4, 0))
@@ -1908,10 +1650,20 @@ class RepTierEditor(ttk.Frame):
         out = []
         for row in self.rows:
             label = row["label"].get().strip()
-            if not label:
+            #! By position, not by the words shown: the day those words get
+            #! translated, matching on them would quietly pick "no face" for
+            #! everything.
+            chosen = row["icon"].current()
+            if chosen < 0 or chosen >= len(REP_ICONS):
+                chosen = 0
+            icon = REP_ICONS[chosen][0]
+            #! A rank showing only a face is the whole point of the faces, so
+            #! a row counts as filled in if it has either one.
+            if not label and not icon:
                 continue
             out.append({"Threshold": safe_int(row["threshold"].get(), 0),
-                        "Label": label})
+                        "Label": label,
+                        "Icon": icon})
         return out
 
     def set_tiers(self, tiers):
@@ -1921,7 +1673,8 @@ class RepTierEditor(ttk.Frame):
         self.rows = []
         for tier in (tiers or []):
             self.add_row(safe_int(tier.get("Threshold", 0), 0),
-                         str(tier.get("Label", "")))
+                         str(tier.get("Label", "")),
+                         str(tier.get("Icon", "")))
         self._loading = False
 
 
@@ -2261,7 +2014,7 @@ class SpeakerLinesEditor(ttk.LabelFrame):
             return
         if not self.app.quest_index:
             messagebox.showinfo(
-                APP_TITLE, "No quest configs found in that folder.",
+                APP_TITLE, tr("No quest configs found in that folder."),
                 parent=self)
             return
         dialog = ChooserDialog(
@@ -2640,6 +2393,315 @@ def parse_trader_map(path):
     return entries
 
 
+# ----------------------------------------------------------------- importing
+
+#! Bringing a server's own characters into the editor. It is all plain data
+#! work -- read what the server has, work out who has no conversation yet, and
+#! write a starter one for them -- so none of it needs the window to be tested.
+
+#! Placeholder openings. They exist so a starter conversation says something
+#! rather than nothing; rewriting them is the whole point of importing.
+STARTER_LINES = {
+    "trader": "What can I do for you?",
+    "p2p": "After something in particular?",
+    "npc": "You need something?",
+    "patrol": "That's close enough. What do you want?",
+}
+
+IMPORT_KIND_LABELS = {
+    "trader": "Trader",
+    "p2p": "P2P trader",
+    "npc": "Quest NPC",
+    "patrol": "AI patrol",
+}
+
+
+def folder_safe(name, fallback="Imported"):
+    """A folder name of nothing but letters, numbers, dash and underscore."""
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "",
+                     (name or "").strip().replace(" ", "_"))
+    return cleaned or fallback
+
+
+def scan_conversations(profile_root):
+    """Who the conversations already in the profile folder talk for."""
+    found = {"npc_ids": set(), "markets": set(), "market_spots": set(),
+             "p2p_ids": set(), "patrol_ids": set(), "tree_ids": set()}
+
+    base = os.path.join(profile_root or "", "Dialogues")
+    if not os.path.isdir(base):
+        return found
+
+    for current, _dirs, files in os.walk(base):
+        folder = os.path.basename(current)
+        for name in sorted(files):
+            if not name.lower().endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(current, name), "r",
+                          encoding="utf-8-sig") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict) or "Nodes" not in data:
+                continue
+
+            found["tree_ids"].add(safe_int(data.get("ID", 0), 0))
+            for npc_id in (data.get("NPCIDs") or []):
+                found["npc_ids"].add(safe_int(npc_id, -1))
+            #! A tree in NPC_<id>\ belongs to that NPC even with no NPCIDs in
+            #! it -- the mod fills the folder's id in when it loads.
+            if folder.lower().startswith("npc_"):
+                found["npc_ids"].add(safe_int(folder[4:], -1))
+            #! A tree with no positions speaks for every trader of that
+            #! definition; one with positions only for the traders standing
+            #! there. Same rule the mod matches by, so a second trader in
+            #! another zone is not written off as already done.
+            spots = [str(spot).strip()
+                     for spot in (data.get("TraderPositions") or [])]
+            for market in (data.get("TraderIDs") or []):
+                market = str(market).strip().lower()
+                if spots:
+                    for spot in spots:
+                        found["market_spots"].add((market, spot))
+                else:
+                    found["markets"].add(market)
+            for trader_id in (data.get("P2PTraderIDs") or []):
+                found["p2p_ids"].add(safe_int(trader_id, -1))
+            patrol_id = safe_int(data.get("AIPatrolID", 0), 0)
+            if patrol_id > 0:
+                found["patrol_ids"].add(patrol_id)
+
+    return found
+
+
+def next_free_id(taken, start=1):
+    """The lowest id from `start` up that nothing has claimed."""
+    candidate = max(start, 1)
+    used = set(taken or [])
+    while candidate in used:
+        candidate += 1
+    return candidate
+
+
+def starter_nodes(kind, greeting):
+    """One screen: something to say, a way to the shop or the quest list, and
+    a way out."""
+    node = new_node(1)
+    node["SpeakerText"] = greeting or STARTER_LINES.get(kind, "")
+
+    responses = []
+    if kind in ("trader", "p2p"):
+        shop = new_response()
+        shop.update({"Text": "Show me what you're selling.",
+                     "ActionType": "OPEN_TRADER"})
+        responses.append(shop)
+    elif kind == "npc":
+        work = new_response()
+        work.update({"Text": "Do you have any work?",
+                     "ActionType": "SHOW_QUEST_LIST"})
+        responses.append(work)
+
+    leaving = new_response()
+    leaving.update({"Text": "Goodbye.", "ActionType": "END_CONVERSATION"})
+    responses.append(leaving)
+
+    node["Responses"] = responses
+    return [node]
+
+
+def starter_tree(kind, payload, tree_id, twins=1):
+    """A ready-to-edit conversation, already matched to who it is for."""
+    tree = new_tree()
+    tree["ID"] = tree_id
+
+    if kind == "trader":
+        tree["TraderIDs"] = [payload.get("market", "")]
+        tree["TraderClassNames"] = [payload.get("class", "")]
+        tree["TraderPositions"] = list(payload.get("positions") or [])
+        tree["TraderPositionRadius"] = 8.0
+        #! The rule the trader picker uses: two traders sharing an entity
+        #! class and a definition are only told apart by where they stand.
+        if payload.get("positions"):
+            tree["TraderMinKeyMatches"] = 3 if twins > 1 else 2
+        else:
+            tree["TraderMinKeyMatches"] = 2
+    elif kind == "p2p":
+        tree["P2PTraderIDs"] = [safe_int(payload.get("id"), -1)]
+    elif kind == "npc":
+        tree["NPCIDs"] = [safe_int(payload.get("id"), -1)]
+    elif kind == "patrol":
+        tree["AIPatrolID"] = safe_int(payload.get("DialogueID"), 0)
+
+    tree["Nodes"] = starter_nodes(kind, payload.get("greeting"))
+    return tree
+
+
+def import_target_path(kind, payload, profile_root):
+    """Where a starter conversation goes, by the mod's own folder rules."""
+    dialogues = os.path.join(profile_root or "", "Dialogues")
+
+    if kind == "trader":
+        folder = "Trader_" + folder_safe(payload.get("name")
+                                         or payload.get("market"), "Trader")
+    elif kind == "p2p":
+        folder = "P2PTrader_" + folder_safe(payload.get("name"), "Trader")
+    elif kind == "npc":
+        folder = "NPC_%d" % safe_int(payload.get("id"), 0)
+    elif kind == "patrol":
+        #! Talkable AI are matched by Dialogue ID, not by folder, so the file
+        #! only has to be somewhere under Dialogues. The editor keeps them in
+        #! AI\ and so does this.
+        return os.path.join(dialogues, "AI",
+                            "%s.json" % folder_safe(payload.get("Name"), "Patrol"))
+    else:
+        folder = "Imported"
+
+    return os.path.join(dialogues, folder, "Dialogue.json")
+
+
+def free_file(path):
+    """`path` if nothing is there, otherwise the same name with a number on
+    it. Two traders on a map can share a label -- and so a folder -- without
+    one quietly landing on top of the other."""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    number = 2
+    while os.path.exists("%s_%d%s" % (stem, number, ext)):
+        number += 1
+    return "%s_%d%s" % (stem, number, ext)
+
+
+def import_candidates(server_root, profile_root, npc_index=None):
+    """Everyone on a server who could hold a conversation, and whether they
+    already do."""
+    have = scan_conversations(profile_root)
+    rows = []
+
+    traders = []
+    for mission in find_trader_maps(server_root):
+        traders.extend(load_trader_map(mission["path"]))
+
+    for entry in traders:
+        twins = sum(1 for other in traders
+                    if other.get("class") == entry.get("class")
+                    and other.get("market") == entry.get("market"))
+        market = str(entry.get("market", "")).strip().lower()
+        covered = market in have["markets"] or any(
+            (market, spot) in have["market_spots"]
+            for spot in (entry.get("positions") or []))
+        rows.append({
+            "kind": "trader",
+            "name": entry.get("name") or entry.get("market"),
+            "where": "%s in %s" % (entry.get("market"), entry.get("file")),
+            "has": covered,
+            "payload": entry,
+            "twins": twins,
+        })
+
+    for trader in find_p2p_traders(server_root):
+        rows.append({
+            "kind": "p2p",
+            "name": trader.get("name"),
+            "where": "id %s in %s" % (trader.get("id"), trader.get("file")),
+            "has": safe_int(trader.get("id"), -1) in have["p2p_ids"],
+            "payload": trader,
+            "twins": 1,
+        })
+
+    for npc in (npc_index or []):
+        npc_id = safe_int(npc.get("id"), -1)
+        rows.append({
+            "kind": "npc",
+            "name": npc.get("title") or ("NPC %s" % npc_id),
+            "where": "id %s in %s" % (npc_id,
+                                      os.path.basename(npc.get("file", ""))),
+            "has": npc_id in have["npc_ids"],
+            "payload": {"id": npc_id,
+                        "name": npc.get("title"),
+                        "greeting": npc_greeting(npc.get("file"))},
+            "twins": 1,
+        })
+
+    return rows, have
+
+
+def npc_greeting(path):
+    """The line an Expansion quest NPC already says, so an imported
+    conversation opens in that character's own words."""
+    try:
+        with open(path or "", "r", encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return ""
+    if isinstance(data, dict):
+        return str(data.get("DefaultNPCText") or "").strip()
+    return ""
+
+
+def find_expansion_patrol_files(server_root):
+    r"""Expansion's own patrol settings, one per mission. They live with the
+    mission (mpmissions\<mission>\expansion\settings\AIPatrolSettings.json),
+    not in the profile folder."""
+    found = []
+    missions = os.path.join(server_root or "", "mpmissions")
+    if not os.path.isdir(missions):
+        return found
+
+    try:
+        entries = sorted(os.listdir(missions))
+    except OSError:
+        return found
+
+    for mission in entries:
+        path = os.path.join(missions, mission, "expansion", "settings",
+                            "AIPatrolSettings.json")
+        if os.path.isfile(path):
+            found.append({"mission": mission, "path": path})
+    return found
+
+
+def patrol_blocker(patrol):
+    """Why this patrol can't be made talkable, or "" when it can.
+
+    The mod spawns a talkable patrol along the waypoints it is given.
+    Expansion's object patrols carry an ObjectClassName and no waypoints --
+    it builds their route around each matching building as the map loads --
+    so there is nothing for the mod to spawn, and it skips them.
+    """
+    obj = str(patrol.get("ObjectClassName") or "").strip()
+    if obj:
+        #! Short on purpose: the object it spawns on is already in the column
+        #! next to this one, and the reason why is in the note above the list.
+        return tr("spawns on an object")
+    waypoints = patrol.get("Waypoints")
+    if not isinstance(waypoints, list) or not waypoints:
+        return tr("has no waypoints, so there is nowhere to put it")
+    return ""
+
+
+def expansion_patrols(data):
+    """The patrols out of Expansion's AIPatrolSettings.json -- or one patrol
+    pasted on its own."""
+    if isinstance(data, dict) and isinstance(data.get("Patrols"), list):
+        return [p for p in data["Patrols"] if isinstance(p, dict)]
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return [p for p in data if isinstance(p, dict)]
+    return []
+
+
+def talkable_patrol(patrol, dialogue_id):
+    """One of Expansion's patrols, as a talkable one for the mod's own
+    AIPatrol\\AIPatrols.json. Everything about the patrol is kept as it was; it
+    only gains the Dialogue ID that ties it to a conversation."""
+    converted = copy.deepcopy(patrol)
+    converted["DialogueID"] = dialogue_id
+    return converted
+
+
 # ---------------------------------------------------------------- validation
 
 def kind_and_key_from_path(path):
@@ -2661,11 +2723,20 @@ def validate_tree_dict(data, kind, key, quest_index=None):
     nodes = data.get("Nodes") or []
     key = (key or "").strip()
 
-    if kind is None:
+    #! The mod only needs the folder when the file names nobody. A tree that
+    #! carries its own keys -- an NPC id, trader keys, a P2P id or a patrol
+    #! id -- is matched on those and can sit anywhere under Dialogues.
+    names_someone = any(data.get(field) for field in (
+        "NPCIDs", "TraderIDs", "TraderClassNames", "TraderPositions",
+        "P2PTraderIDs")) or safe_int(data.get("AIPatrolID"), 0) > 0
+
+    if kind is None and not names_someone:
         warnings.append(
-            "Sitting in a folder the mod doesn't recognise. Dialogue files "
-            "belong in NPC_<id>, Trader_<name> or Shared.")
-    elif kind == "SHARED" and not (data.get("NPCIDs") or []):
+            "Sitting in a folder the mod doesn't recognise, and it doesn't "
+            "name anyone either. Put it in NPC_<id>, Trader_<name> or "
+            "Shared, or give it an NPC ID, trader keys, a P2P trader ID or "
+            "an AI patrol ID.")
+    if kind == "SHARED" and not (data.get("NPCIDs") or []):
         issues.append(
             "Shared trees must list at least one NPC ID - the mod cannot "
             "infer them from a Shared folder.")
@@ -2676,6 +2747,8 @@ def validate_tree_dict(data, kind, key, quest_index=None):
 
     if not nodes:
         issues.append("No nodes at all - this conversation can't open.")
+
+    warnings.extend(list_length_warnings(data, TREE_TEXT_LISTS, ""))
 
     ids = [n.get("ID") for n in nodes]
     for node_id in set(ids):
@@ -2780,16 +2853,18 @@ def validate_tree_dict(data, kind, key, quest_index=None):
             issues.append(
                 "%s has every option gated behind a quest. Players who "
                 "haven't finished them get a line with no buttons." % label)
-        long_line = line_length_warning(node.get("SpeakerText"),
-                                        "%s's line" % label)
+        long_line = piece_line_warning(node.get("SpeakerText"),
+                                       node.get("SpeakerTextMore"),
+                                       "%s's line" % label)
         if long_line:
             warnings.append(long_line)
 
         for alt_index, alt in enumerate(node.get("SpeakerLines") or []):
             if not isinstance(alt, dict):
                 continue
-            long_alt = line_length_warning(
-                alt.get("Text"), "%s alternate line %d" % (label, alt_index + 1))
+            long_alt = piece_line_warning(
+                alt.get("Text"), alt.get("TextMore"),
+                "%s alternate line %d" % (label, alt_index + 1))
             if long_alt:
                 warnings.append(long_alt)
 
@@ -2956,6 +3031,21 @@ def validate_tree_dict(data, kind, key, quest_index=None):
                         "more than / is below / is exactly / is not."
                         % (label, o.get("Name"), o.get("Op")))
 
+    for index, tier in enumerate(data.get("ReputationTiers") or []):
+        rank = index + 1
+        face = str(tier.get("Icon", "") or "").strip().upper()
+        wording = str(tier.get("Label", "") or "").strip()
+        if face and face not in REP_ICON_LABELS:
+            issues.append(
+                "Reputation rank %d asks for the icon '%s'. It has to be "
+                "HAPPY, NEUTRAL, ANGRY, THUMBUP, THUMBSIDE or THUMBDOWN, "
+                "or left empty for none."
+                % (rank, face))
+        if not face and not wording:
+            warnings.append(
+                "Reputation rank %d has neither a word nor an icon, so "
+                "nothing shows when a player is on it." % rank)
+
     return issues, warnings
 
 
@@ -2980,10 +3070,37 @@ def validate_quest_dict(data):
               "InProgressBackTexts", "TurnInBackTexts"]
     for quest in quests:
         if not any(quest.get(f) for f in fields) \
-                and not quest.get("RewardSelectText"):
+                and not quest.get("RewardSelectText") \
+                and not quest.get("RepOnComplete"):
             warnings.append(
                 "Quest %s has no wording at all - it will use the built-in "
                 "defaults." % quest.get("QuestID"))
+
+        prefix = "Quest %s: " % quest.get("QuestID")
+        warnings.extend(list_length_warnings(quest, QUEST_TEXT_LISTS, prefix))
+        reward_line = line_length_warning(
+            str(quest.get("RewardSelectText") or ""),
+            prefix + "Line above the reward choice")
+        if reward_line:
+            warnings.append(reward_line)
+
+        for op in (quest.get("RepOnComplete") or []):
+            if not isinstance(op, dict):
+                continue
+            if not str(op.get("Name", "") or "").strip():
+                issues.append(
+                    "Quest %s changes a reputation on completion but doesn't "
+                    "say which one." % quest.get("QuestID"))
+            elif op.get("Op") not in VAR_SET_OPS:
+                issues.append(
+                    "Quest %s changes reputation '%s' with an unknown action "
+                    "'%s' - expected Increase by / Decrease by / Set to."
+                    % (quest.get("QuestID"), op.get("Name"), op.get("Op")))
+            elif safe_int(op.get("Value"), 0) == 0 \
+                    and op.get("Op") != "SET":
+                warnings.append(
+                    "Quest %s changes reputation '%s' by 0, which does "
+                    "nothing." % (quest.get("QuestID"), op.get("Name")))
         has_buttons = quest.get("NoQuestsBackTexts") \
             or quest.get("NoQuestsLeaveTexts")
         if has_buttons and not quest.get("NoQuestsTexts"):
@@ -3019,23 +3136,49 @@ def validate_menu_dict(cfg, resolved=None):
     if cfg.get("Position") not in POSITIONS:
         issues.append("Position '%s' isn't one of the nine presets."
                       % cfg.get("Position"))
-    style = cfg.get("FontStyle")
-    if style is None:
-        warnings.append(
-            "No FontStyle set. The mod defaults to DEFAULT, but writing it "
-            "explicitly keeps the file readable.")
-    elif style not in dict(FONT_STYLES):
+    #! Checked on what is actually there. A file may carry the new pair, the
+    #! old FontStyle, or both, and only a value that is present and wrong is
+    #! worth reporting.
+    if cfg.get("Font") is not None and cfg.get("Font") not in dict(FONTS):
         issues.append(
-            "FontStyle '%s' isn't one of %s."
-            % (style, ", ".join(key for key, _d in FONT_STYLES)))
+            "Font '%s' isn't one of %s."
+            % (cfg.get("Font"), ", ".join(key for key, _d in FONTS)))
+
+    if (cfg.get("TextSize") is not None
+            and cfg.get("TextSize") not in dict(TEXT_SIZES)):
+        issues.append(
+            "TextSize '%s' isn't one of %s."
+            % (cfg.get("TextSize"), ", ".join(key for key, _d in TEXT_SIZES)))
+
+    style = cfg.get("FontStyle")
+    if style is not None and style not in LEGACY_FONT_STYLES:
+        issues.append(
+            "FontStyle '%s' isn't one of %s. It is the older field that Font "
+            "and TextSize replaced."
+            % (style, ", ".join(sorted(LEGACY_FONT_STYLES))))
+
+    if cfg.get("Font") is None and cfg.get("TextSize") is None:
+        warnings.append(
+            "No Font or TextSize set. The mod falls back to FontStyle, and "
+            "then to Metron Book at normal size, but writing them keeps the "
+            "file readable.")
 
     version = cfg.get("ConfigVersion")
-    if isinstance(version, int) and version < 6:
+    if isinstance(version, int) and version < 10:
         warnings.append(
             "ConfigVersion is %s. FontStyle arrived in version 2, "
             "ShowResponseIcons in 3, ShowLanguageButton in 4, "
-            "ScaleTextWithPanel in 5 and ShowErrorNotifications in 6 - "
-            "saving from here updates it." % version)
+            "ScaleTextWithPanel in 5, ShowErrorNotifications in 6, "
+            "ScrollSpeed in 7, ShowReputationNotifications in 8 and the "
+            "book page's wording in 9 and its column headings in 10 - saving from here updates it."
+            % version)
+
+    if "ScrollSpeed" in cfg:
+        speed = safe_float(cfg.get("ScrollSpeed"), 1.0)
+        if speed < 0.25 or speed > 4.0:
+            issues.append(
+                "ScrollSpeed is %s. It has to be between 0.25 and 4.0, and "
+                "anything outside that is ignored in favour of 1.0." % speed)
 
     if cfg.get("ShowResponseIcons") and override_uses_custom_layout(cfg):
         warnings.append(
@@ -3587,6 +3730,20 @@ class DialogueTab(ttk.Frame):
                                  lambda _e: self._on_reputation_typed())
         self.rep_key_hint = ttk.Label(rep_frame, text="", style="Hint.TLabel")
         self.rep_key_hint.pack(anchor="w", padx=6)
+
+        max_row = ttk.Frame(rep_frame)
+        max_row.pack(fill="x", padx=6, pady=(2, 0))
+        ttk.Label(max_row, text="Out of").pack(side="left")
+        self.reputation_max = ttk.Spinbox(max_row, from_=0, to=1000000,
+                                          width=8, command=self.mark_dirty)
+        self.reputation_max.pack(side="left", padx=(4, 0))
+        self.reputation_max.bind("<KeyRelease>", lambda _e: self.mark_dirty())
+        ttk.Label(
+            max_row,
+            text="the most this character's standing is meant to reach. The "
+                 "book page reads \"10 / 100\" instead of a bare number. 0 "
+                 "shows no total. Nothing enforces it.",
+            wraplength=300, style="Hint.TLabel").pack(side="left", padx=6)
         ttk.Label(rep_frame, text="Marker shows (optional tiers):",
                   style="Hint.TLabel").pack(anchor="w", padx=6, pady=(2, 0))
         self.rep_tiers = RepTierEditor(rep_frame, on_change=self.mark_dirty)
@@ -3880,7 +4037,7 @@ class DialogueTab(ttk.Frame):
     def remove_tree(self):
         if self.current_stage_index < 0:
             messagebox.showinfo(
-                APP_TITLE, "Tree 1 is the base tree and can't be removed.",
+                APP_TITLE, tr("Tree 1 is the base tree and can't be removed."),
                 parent=self)
             return
         stages = self.tree.get("Stages") or []
@@ -3889,8 +4046,8 @@ class DialogueTab(ttk.Frame):
             return
         quest = stages[idx].get("RequiredQuestID", -1)
         if not messagebox.askyesno(
-                APP_TITLE, "Delete Tree %d (after quest %s) and every node in "
-                "it?" % (idx + 2, quest), parent=self):
+                APP_TITLE, tr("Delete Tree %d (after quest %s) and every node in "
+                "it?") % (idx + 2, quest), parent=self):
             return
         del stages[idx]
         self.current_stage_index = -1
@@ -4146,8 +4303,8 @@ class DialogueTab(ttk.Frame):
         if not rep:
             messagebox.showinfo(
                 APP_TITLE,
-                "Give this character a name first, in the \"This character's "
-                "reputation\" box on the \"Who it's for & voice lines\" tab.",
+                tr("Give this character a name first, in the \"This character's "
+                "reputation\" box on the \"Who it's for & voice lines\" tab."),
                 parent=self)
         return rep
 
@@ -4258,10 +4415,10 @@ class DialogueTab(ttk.Frame):
         if not entries:
             messagebox.showinfo(
                 APP_TITLE,
-                "No P2P traders found. They live in\n"
+                tr("No P2P traders found. They live in\n"
                 "mpmissions\\<mission>\\expansion\\p2pmarket\\P2PTrader_<n>.json.\n\n"
                 "Set your profile folder on the Server files tab first, so "
-                "Forge knows which server to look in.", parent=self)
+                "Forge knows which server to look in."), parent=self)
             return
 
         dialog = P2PTraderChooser(self.app, entries)
@@ -4287,10 +4444,10 @@ class DialogueTab(ttk.Frame):
             if not entries:
                 if not messagebox.askyesno(
                         APP_TITLE,
-                        "No traders found in:\n%s\n\nA trader map line "
+                        tr("No traders found in:\n%s\n\nA trader map line "
                         "looks like:\n\nExpansionTraderAIMaria.Medicals|"
                         "6500.47 6.63 2243.81|110 0 0|name:Anna\n\nRead a "
-                        "different map?" % source, parent=self):
+                        "different map?") % source, parent=self):
                     return
                 source = self.app.choose_trader_map()
                 continue
@@ -4365,8 +4522,8 @@ class DialogueTab(ttk.Frame):
         if not self.app.npc_index:
             messagebox.showinfo(
                 APP_TITLE,
-                "No quest NPC configs found. These usually live in the "
-                "NPCs folder next to your Expansion quests.", parent=self)
+                tr("No quest NPC configs found. These usually live in the "
+                "NPCs folder next to your Expansion quests."), parent=self)
             return
         dialog = ChooserDialog(self.app, "Pick a quest NPC",
                                self.app.npc_index,
@@ -4545,6 +4702,8 @@ class DialogueTab(ttk.Frame):
         if hasattr(self, "reputation_var"):
             self.tree["ReputationVar"] = rep_key_from_name(
                 self.reputation_var.get())
+            self.tree["ReputationMax"] = max(
+                0, safe_int(self.reputation_max.get(), 0))
             self.tree["ReputationTiers"] = self.rep_tiers.get_tiers()
         self.tree["GreetingVoiceLineIDs"] = self.greeting.get_items()
         self.tree["FarewellVoiceLineIDs"] = self.farewell.get_items()
@@ -4585,6 +4744,9 @@ class DialogueTab(ttk.Frame):
         self.reputation_var.insert(
             0, rep_label_from_key(self.tree.get("ReputationVar", "") or ""))
         self._refresh_rep_hint()
+        self.reputation_max.delete(0, tk.END)
+        self.reputation_max.insert(
+            0, str(safe_int(self.tree.get("ReputationMax", 0), 0)))
         self.rep_tiers.set_tiers(self.tree.get("ReputationTiers"))
         self.loading = False
         self.on_target_change()
@@ -4790,7 +4952,7 @@ class DialogueTab(ttk.Frame):
 
         self.mark_dirty()
         messagebox.showinfo(
-            APP_TITLE, "Copied %d node(s) into %s." % (
+            APP_TITLE, tr("Copied %d node(s) into %s.") % (
                 len(to_copy),
                 "Tree 1" if target_index < 0 else "Tree %d" % (target_index + 2)),
             parent=self)
@@ -4861,7 +5023,7 @@ class DialogueTab(ttk.Frame):
             return
         if len(self.container()["Nodes"]) == 1:
             messagebox.showinfo(
-                APP_TITLE, "A tree needs at least one node.", parent=self)
+                APP_TITLE, tr("A tree needs at least one node."), parent=self)
             return
         node_id = self.current_node.get("ID")
         incoming = sum(
@@ -4890,7 +5052,7 @@ class DialogueTab(ttk.Frame):
             return
         if new_id < 1:
             messagebox.showwarning(
-                APP_TITLE, "Node IDs start at 1 - 0 is treated as 'unset'.",
+                APP_TITLE, tr("Node IDs start at 1 - 0 is treated as 'unset'."),
                 parent=self)
             new_id = 1
         clash = [n for n in self.container()["Nodes"]
@@ -4898,8 +5060,8 @@ class DialogueTab(ttk.Frame):
         if clash:
             messagebox.showwarning(
                 APP_TITLE,
-                "Node ID %d is already used. Duplicate IDs silently break "
-                "navigation." % new_id, parent=self)
+                tr("Node ID %d is already used. Duplicate IDs silently break "
+                "navigation.") % new_id, parent=self)
             self.loading = True
             self.node_id.delete(0, tk.END)
             self.node_id.insert(0, str(self.current_node.get("ID")))
@@ -4924,44 +5086,29 @@ class DialogueTab(ttk.Frame):
         if value != "STANDARD":
             messagebox.showwarning(
                 APP_TITLE,
-                "QUEST_LIST and QUEST_DETAIL nodes are built live by the mod "
+                tr("QUEST_LIST and QUEST_DETAIL nodes are built live by the mod "
                 "from real Expansion quest data. Authoring them by hand is "
-                "not supported - use STANDARD.", parent=self)
+                "not supported - use STANDARD."), parent=self)
         self.current_node["Type"] = value
         self.refresh_outline(reload_editors=False)
         self.mark_dirty()
 
     def update_speaker_length(self):
-        """Characters and bytes, because the engine counts the second."""
+        """No limit to warn about since 1.6.0 -- a long line is saved in
+        pieces, and so is its translation."""
         if not hasattr(self, "speaker_len"):
             return
         raw = self.speaker_text.get("1.0", "end-1c")
-        nchars = len(raw)
-        nbytes = len(raw.encode("utf-8"))
         if not raw.strip():
             self.speaker_len.configure(text="", foreground="#888888")
-        elif nbytes >= LINE_BYTES_LIMIT:
-            self.speaker_len.configure(
-                text="%d bytes of %d - THIS WILL BE CUT OFF in game. "
-                     "Shorten it or split it across nodes."
-                     % (nbytes, LINE_BYTES_LIMIT),
-                foreground="#c0392b")
-        elif nbytes >= LINE_BYTES_CLOSE:
-            self.speaker_len.configure(
-                text="%d bytes of %d - close to the limit the game reads."
-                     % (nbytes, LINE_BYTES_LIMIT),
-                foreground="#b9770e")
-        elif nchars >= TRANSLATION_RISK_CHARS:
-            self.speaker_len.configure(
-                text="%d bytes of %d - fits in English, but a Russian "
-                     "translation would be cut off."
-                     % (nbytes, LINE_BYTES_LIMIT),
-                foreground="#b9770e")
+            return
+        _first, more = split_long_text(raw)
+        if more:
+            text = tr("%d characters - saved in %d pieces the game joins "
+                      "back together.") % (len(raw), len(more) + 1)
         else:
-            self.speaker_len.configure(
-                text="%d characters, %d bytes of %d"
-                     % (nchars, nbytes, LINE_BYTES_LIMIT),
-                foreground="#888888")
+            text = tr("%d characters") % len(raw)
+        self.speaker_len.configure(text=text, foreground="#888888")
 
     def commit_speaker(self):
         self.update_speaker_length()
@@ -5120,8 +5267,8 @@ class DialogueTab(ttk.Frame):
         if not self.app.quest_index:
             messagebox.showinfo(
                 APP_TITLE,
-                "No quest configs found in that folder. Point it at the "
-                "folder holding your Expansion quest .json files.",
+                tr("No quest configs found in that folder. Point it at the "
+                "folder holding your Expansion quest .json files."),
                 parent=self)
             return
         dialog = ChooserDialog(
@@ -5143,8 +5290,8 @@ class DialogueTab(ttk.Frame):
         if not self.app.quest_index:
             messagebox.showinfo(
                 APP_TITLE,
-                "No quest configs found in that folder. Point it at the "
-                "folder holding your Expansion quest .json files.",
+                tr("No quest configs found in that folder. Point it at the "
+                "folder holding your Expansion quest .json files."),
                 parent=self)
             return None
         dialog = ChooserDialog(self.app, title, self.app.quest_index, hint)
@@ -5336,7 +5483,7 @@ class DialogueTab(ttk.Frame):
     def add_response(self):
         if not self.current_node:
             messagebox.showinfo(
-                APP_TITLE, "Select a node first.", parent=self)
+                APP_TITLE, tr("Select a node first."), parent=self)
             return
         response = new_response()
         typed = self.response_text.get().strip()
@@ -5397,7 +5544,7 @@ class DialogueTab(ttk.Frame):
                 self.refresh_map()
                 return
         messagebox.showinfo(
-            APP_TITLE, "Node %d doesn't exist yet." % target, parent=self)
+            APP_TITLE, tr("Node %d doesn't exist yet.") % target, parent=self)
 
 
     def layout_map(self):
@@ -5594,11 +5741,17 @@ class DialogueTab(ttk.Frame):
             out["AIPatrolSubID"] = safe_int(self.tree.get("AIPatrolSubID", 0), 0)
         if (self.tree.get("ReputationVar") or "").strip():
             out["ReputationVar"] = self.tree.get("ReputationVar", "").strip()
+            out["ReputationMax"] = max(
+                0, safe_int(self.tree.get("ReputationMax", 0), 0))
+            #! A rank with only a face and no word is kept: showing the face
+            #! instead of the wording is what the faces are for.
             out["ReputationTiers"] = [
                 {"Threshold": safe_int(t.get("Threshold", 0), 0),
-                 "Label": str(t.get("Label", ""))}
+                 "Label": str(t.get("Label", "")),
+                 "Icon": str(t.get("Icon", "")).upper()}
                 for t in (self.tree.get("ReputationTiers") or [])
                 if str(t.get("Label", "")).strip()
+                or str(t.get("Icon", "")).strip()
             ]
         out["GreetingVoiceLineIDs"] = list(
             self.tree.get("GreetingVoiceLineIDs", []))
@@ -5635,24 +5788,32 @@ class DialogueTab(ttk.Frame):
     def _serialize_nodes(self, nodes):
         out_nodes = []
         for node in nodes:
+            #! Past the game's per-string limit a line goes out in pieces the
+            #! mod joins back up; a short one is written exactly as before.
+            first, more = split_long_text(node.get("SpeakerText", ""))
             entry = {
                 "ID": safe_int(node.get("ID", 1), 1),
                 "Type": node.get("Type", "STANDARD") or "STANDARD",
-                "SpeakerText": node.get("SpeakerText", ""),
-                "VoiceLineIDs": list(node.get("VoiceLineIDs", [])),
-                "Responses": [],
+                "SpeakerText": first,
             }
+            if more:
+                entry["SpeakerTextMore"] = more
+            entry["VoiceLineIDs"] = list(node.get("VoiceLineIDs", []))
+            entry["Responses"] = []
             speaker_lines = []
             for line in (node.get("SpeakerLines") or []):
                 gate = line.get("RequiredQuestID", -1)
                 override = line.get("OverrideQuestID", -1)
-                line_entry = {
-                    "Text": line.get("Text", ""),
-                    "RequiredQuestID": gate if gate and gate > 0 else -1,
-                    "OverrideQuestID": override if override and override > 0
-                    else -1,
-                    "VoiceLineIDs": list(line.get("VoiceLineIDs") or []),
-                }
+                line_first, line_more = split_long_text(line.get("Text", ""))
+                line_entry = {"Text": line_first}
+                if line_more:
+                    line_entry["TextMore"] = line_more
+                line_entry["RequiredQuestID"] = gate if gate and gate > 0 \
+                    else -1
+                line_entry["OverrideQuestID"] = override \
+                    if override and override > 0 else -1
+                line_entry["VoiceLineIDs"] = list(line.get("VoiceLineIDs")
+                                                  or [])
                 req = clean_var_ops(line.get("RequiredVars"))
                 if req:
                     line_entry["RequiredVars"] = req
@@ -5697,18 +5858,24 @@ class DialogueTab(ttk.Frame):
             out_nodes.append(entry)
         return out_nodes
 
+    #! A long line arrives in pieces (SpeakerTextMore / TextMore) and is joined
+    #! here, so the author only ever edits one line; _serialize_nodes splits it
+    #! again. Rebuilding a node from named fields without this is what dropped
+    #! every piece after the first on save.
     def _load_nodes(self, raw):
         return [
             {
                 "ID": safe_int(n.get("ID", 1), 1),
                 "Type": n.get("Type", "STANDARD") or "STANDARD",
-                "SpeakerText": n.get("SpeakerText", ""),
+                "SpeakerText": join_long_text(n.get("SpeakerText", ""),
+                                              n.get("SpeakerTextMore")),
                 "VoiceLineIDs": list(n.get("VoiceLineIDs") or []),
                 "Responses": [self._load_response(r)
                               for r in (n.get("Responses") or [])],
                 "SpeakerLines": [
                     {
-                        "Text": line.get("Text", ""),
+                        "Text": join_long_text(line.get("Text", ""),
+                                               line.get("TextMore")),
                         "RequiredQuestID": safe_int(
                             line.get("RequiredQuestID", -1), -1),
                         "OverrideQuestID": safe_int(
@@ -5941,6 +6108,23 @@ class QuestTextTab(ttk.Frame):
             "<FocusIn>", lambda _e: self.set_focus_key("RewardSelectText"),
             add="+")
 
+        rep_section = CollapsibleSection(
+            right, "Reputation for finishing this quest", expanded=False)
+        rep_section.pack(fill="x", padx=2, pady=(0, 4))
+        rep_box = rep_section.content()
+        ttk.Label(
+            rep_box,
+            text="Applied on the server the moment the quest is handed in, "
+                 "however it was handed in - through a conversation or "
+                 "Expansion's own screen. One quest can raise one "
+                 "character's standing and lower another's at the same time.",
+            wraplength=600, style="Hint.TLabel").pack(
+            anchor="w", padx=6, pady=(4, 2))
+        self.rep_on_complete = VarOpEditor(
+            rep_box, "set", on_change=self.commit,
+            name_provider=self.app.known_reputations)
+        self.rep_on_complete.pack(fill="x", padx=6, pady=(0, 6))
+
         def completed_intro(box):
             ttk.Label(box,
                       text="After this quest is completed  —  overrides the "
@@ -6120,8 +6304,8 @@ class QuestTextTab(ttk.Frame):
         if not path or not os.path.isfile(path):
             messagebox.showinfo(
                 APP_TITLE,
-                "Can't find this quest's config file on disk, so this line "
-                "can't be edited here.", parent=self)
+                tr("Can't find this quest's config file on disk, so this line "
+                "can't be edited here."), parent=self)
             return
         editor["editing"] = True
         editor["text"].configure(state="normal")
@@ -6143,7 +6327,7 @@ class QuestTextTab(ttk.Frame):
                 data = json.load(handle)
         except Exception as exc:
             messagebox.showerror(
-                APP_TITLE, "Couldn't read the quest file:\n\n%s" % exc,
+                APP_TITLE, tr("Couldn't read the quest file:\n\n%s") % exc,
                 parent=self)
             return
         descriptions = data.get("Descriptions")
@@ -6157,7 +6341,7 @@ class QuestTextTab(ttk.Frame):
             write_json(path, data)
         except Exception as exc:
             messagebox.showerror(
-                APP_TITLE, "Couldn't save the quest file:\n\n%s" % exc,
+                APP_TITLE, tr("Couldn't save the quest file:\n\n%s") % exc,
                 parent=self)
             return
         entry[editor["cache_key"]] = new_text
@@ -6172,7 +6356,7 @@ class QuestTextTab(ttk.Frame):
             return
         if not self.app.quest_index:
             messagebox.showinfo(
-                APP_TITLE, "No quest configs found in that folder.",
+                APP_TITLE, tr("No quest configs found in that folder."),
                 parent=self)
             return
         dialog = ChooserDialog(self.app, "Pick a quest", self.app.quest_index,
@@ -6218,6 +6402,7 @@ class QuestTextTab(ttk.Frame):
             editor.set_items(self.current.get(key) or [])
         self.reward_text.delete(0, tk.END)
         self.reward_text.insert(0, self.current.get("RewardSelectText", ""))
+        self.rep_on_complete.set_ops(self.current.get("RepOnComplete") or [])
         self.loading = False
 
     def on_selected(self, _event=None):
@@ -6233,6 +6418,7 @@ class QuestTextTab(ttk.Frame):
         for key, editor in self.editors.items():
             self.current[key] = editor.get_items()
         self.current["RewardSelectText"] = self.reward_text.get()
+        self.current["RepOnComplete"] = self.rep_on_complete.get_ops()
         index = self.quests.index(self.current)
         self.quest_list.delete(index)
         self.quest_list.insert(index, self.label_for(self.current))
@@ -6267,7 +6453,7 @@ class QuestTextTab(ttk.Frame):
         self.current = None
         self.refresh_list()
 
-    QUEST_TEXT_CONFIG_VERSION = 2
+    QUEST_TEXT_CONFIG_VERSION = 3
 
     SCREENS = {
         "AcceptTexts": "offer",
@@ -6396,6 +6582,7 @@ class QuestTextTab(ttk.Frame):
             for key, _label, _hint in self.all_list_fields:
                 entry[key] = list(quest.get(key) or [])
             entry["RewardSelectText"] = quest.get("RewardSelectText", "")
+            entry["RepOnComplete"] = clean_var_ops(quest.get("RepOnComplete"))
             entries.append(entry)
         version = max(self.config_version, self.QUEST_TEXT_CONFIG_VERSION)
         return {"ConfigVersion": version, "Quests": entries}
@@ -6409,6 +6596,10 @@ class QuestTextTab(ttk.Frame):
             for key, _label, _hint in self.all_list_fields:
                 entry[key] = list(quest.get(key) or [])
             entry["RewardSelectText"] = quest.get("RewardSelectText", "")
+            #! Every field has to be carried across here: the entry is built
+            #! fresh rather than copied, so one left out is one silently
+            #! dropped the next time the file is saved.
+            entry["RepOnComplete"] = clean_var_ops(quest.get("RepOnComplete"))
             self.quests.append(entry)
         if path:
             self.file_name.set(os.path.basename(path))
@@ -6426,6 +6617,161 @@ class QuestTextTab(ttk.Frame):
 
 
 # ---------------------------------------------------------------- menu tab
+
+class ReputationTab(ttk.Frame):
+    """The server-wide reputation settings, gathered where an owner can find
+    them.
+
+    These live in MenuConfig.json along with the window's appearance, and the
+    Menu appearance tab stays the only thing that writes that file -- two tabs
+    writing one file would each blank out the other's half of it. This tab
+    holds the boxes; that one reads them when it saves. Saving from here saves
+    the whole file, through it.
+    """
+
+    def __init__(self, master, app):
+        ttk.Frame.__init__(self, master)
+        self.app = app
+
+        wrap = ScrollFrame(self)
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        body = wrap.inner
+
+        ttk.Label(
+            body,
+            text="Reputation is how much each character thinks of a player. "
+                 "What is on this tab applies to your whole server and is "
+                 "saved in MenuConfig.json, the same file as the window's "
+                 "appearance.",
+            wraplength=680, style="Hint.TLabel").pack(anchor="w", pady=(0, 8))
+
+        # ---- the pop-up
+        notify = ttk.LabelFrame(body, text="When a choice changes reputation",
+                                style="Section.TLabelframe")
+        notify.pack(fill="x", pady=(0, 8))
+
+        self.rep_notifications = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            notify,
+            text="Tell players who a choice pleased or annoyed",
+            variable=self.rep_notifications,
+            command=self.on_change).pack(anchor="w", padx=8, pady=(6, 2))
+
+        ttk.Label(
+            notify,
+            text="A pop-up naming the character and how far their standing "
+                 "moved - \"Yefim  +5\". Only for changes a player made by "
+                 "picking something; reputation your quests hand out stays "
+                 "quiet. Players can override this for themselves under "
+                 "Settings in the conversation window.",
+            wraplength=660, style="Hint.TLabel").pack(anchor="w", padx=8,
+                                                      pady=(0, 8))
+
+        # ---- the book page
+        book = ttk.LabelFrame(
+            body, text="The standing page in Expansion's book",
+            style="Section.TLabelframe")
+        book.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(
+            book,
+            text="Players open Expansion's book and see where they stand with "
+                 "every character at once. Leave a box empty and that one word "
+                 "uses the mod's own wording in each player's language; fill "
+                 "it in and it reads that way for everyone.",
+            wraplength=660, style="Hint.TLabel").pack(anchor="w", padx=8,
+                                                      pady=(6, 6))
+
+        grid = ttk.Frame(book)
+        grid.pack(fill="x", padx=8, pady=(0, 8))
+        #! The slack goes after the last column, so the word a box falls back
+        #! to stays next to that box instead of drifting to the far edge.
+        grid.columnconfigure(3, weight=1)
+
+        #! Captions written out one by one, not looped: one built from a
+        #! variable is invisible to the translation tool and stays English.
+        ttk.Label(grid, text="Left empty it says",
+                  style="Hint.TLabel").grid(row=0, column=2, sticky="w",
+                                            padx=8)
+
+        #! Quoted so each is its own string to translate -- these must read
+        #! exactly as the mod's page does, which a shared "Name" cannot.
+        self.boxes = {}
+        self.boxes["BookTabName"] = self.book_row(
+            grid, 1, "Tab name", "“Standing”")
+        self.boxes["BookPageTitle"] = self.book_row(
+            grid, 2, "Page heading", "“Where you stand”")
+        self.boxes["BookColumnName"] = self.book_row(
+            grid, 3, "First column", "“Name”")
+        self.boxes["BookColumnStatus"] = self.book_row(
+            grid, 4, "Second column", "“Status”")
+        self.boxes["BookColumnReputation"] = self.book_row(
+            grid, 5, "Third column", "“Reputation”")
+
+        # ---- where the rest of it lives
+        rest = ttk.LabelFrame(body, text="Set per character, not here",
+                              style="Section.TLabelframe")
+        rest.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            rest,
+            text="A character's own reputation - its name, the ranks and "
+                 "icons shown beside it, and the most it can reach - belongs "
+                 "to that character's conversation, so it is on the Dialogue "
+                 "tab under \"Who it's for & voice lines\". What a quest pays "
+                 "out is on the Quest wording tab, under \"Reputation for "
+                 "finishing this quest\".",
+            wraplength=660, style="Hint.TLabel").pack(anchor="w", padx=8,
+                                                      pady=(6, 8))
+
+        ttk.Button(body, text="Save reputation and menu appearance",
+                   command=lambda: self.app.save_current()).pack(anchor="w")
+
+    def book_row(self, grid, row, label, hint):
+        """One box on the book page, with the word the mod uses when it is
+        left empty. Both captions are handed in whole so they translate."""
+        #! No fixed width: German runs a good deal longer than English here
+        #! and a set width clips it.
+        ttk.Label(grid, text=label).grid(
+            row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+        box = ttk.Entry(grid, width=28)
+        box.grid(row=row, column=1, sticky="w", pady=2)
+        box.bind("<KeyRelease>", lambda _e: self.on_change())
+        ttk.Label(grid, text=hint, style="Hint.TLabel").grid(
+            row=row, column=2, sticky="w", padx=8)
+        return box
+
+    def on_change(self):
+        self.app.mark_editor_dirty("Menu appearance")
+        #! The preview shows nothing from this tab, but the appearance tab
+        #! keeps its own idea of the config in step this way.
+        if hasattr(self.app, "menu_tab"):
+            self.app.menu_tab.on_change()
+
+    def values(self):
+        out = {"ShowReputationNotifications":
+               bool(self.rep_notifications.get())}
+        for key, box in self.boxes.items():
+            out[key] = box.get().strip()
+        return out
+
+    def apply(self, data):
+        self.rep_notifications.set(
+            bool(data.get("ShowReputationNotifications", True)))
+        for key, box in self.boxes.items():
+            box.delete(0, tk.END)
+            box.insert(0, data.get(key, ""))
+
+    #! Saving and checking from here act on the whole appearance file, so an
+    #! owner who only ever opens this tab still writes a complete one.
+    def build_output(self):
+        return self.app.menu_tab.build_output()
+
+    def output_path(self):
+        return self.app.menu_tab.output_path()
+
+    def validate(self):
+        return self.app.menu_tab.validate()
+
 
 class MenuConfigTab(ttk.Frame):
 
@@ -6476,6 +6822,10 @@ class MenuConfigTab(ttk.Frame):
              "How far edge-hugging presets sit from the screen edge."),
             ("VisitedResponseOpacity", "Already-picked fade", 0.0, 1.0, 0.05,
              "Dims options the player already chose. 1.0 = no fading."),
+            ("ScrollSpeed", "Scroll speed", 0.25, 4.0, 0.05,
+             "How far the mouse wheel moves a long speech. 1.0 is normal. "
+             "Players can set their own in the window's settings screen, "
+             "and theirs wins."),
         ]
         row_index = 2
         for key, label, low, high, step, hint in slider_specs:
@@ -6543,14 +6893,23 @@ class MenuConfigTab(ttk.Frame):
 
         row = ttk.Frame(fonts)
         row.pack(fill="x", padx=6, pady=6)
-        ttk.Label(row, text="Font style").pack(side="left")
+        ttk.Label(row, text="Font").pack(side="left")
         self.font_style = ttk.Combobox(
-            row, values=[key for key, _desc in FONT_STYLES],
-            width=12, state="readonly")
+            row, values=[key for key, _desc in FONTS],
+            width=10, state="readonly")
         self.font_style.set("DEFAULT")
         self.font_style.pack(side="left", padx=6)
         self.font_style.bind("<<ComboboxSelected>>",
                              lambda _e: self.on_font_style())
+
+        ttk.Label(row, text="Text size").pack(side="left", padx=(10, 0))
+        self.text_size = ttk.Combobox(
+            row, values=[key for key, _desc in TEXT_SIZES],
+            width=10, state="readonly")
+        self.text_size.set("NORMAL")
+        self.text_size.pack(side="left", padx=6)
+        self.text_size.bind("<<ComboboxSelected>>",
+                            lambda _e: self.on_font_style())
 
         self.show_icons = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -6589,6 +6948,9 @@ class MenuConfigTab(ttk.Frame):
                        "always goes to your log either way.",
                   wraplength=420, style="Hint.TLabel").pack(
             anchor="w", padx=6, pady=(0, 4))
+
+        #! Reputation and the book page are on ReputationTab; this tab still
+        #! writes them, from the widgets over there.
 
         ttk.Label(fonts,
                   text="The language option only ever appears if you have "
@@ -6641,9 +7003,11 @@ class MenuConfigTab(ttk.Frame):
         self.on_change()
 
     def on_font_style(self):
-        descriptions = dict(FONT_STYLES)
-        self.font_note.configure(
-            text=descriptions.get(self.font_style.get(), ""))
+        note = dict(FONTS).get(self.font_style.get(), "")
+        size_note = dict(TEXT_SIZES).get(self.text_size.get(), "")
+        if size_note and self.text_size.get() != "NORMAL":
+            note = note + "   |   " + size_note
+        self.font_note.configure(text=note)
         self.on_change()
 
     def on_change(self, *_args):
@@ -6681,18 +7045,43 @@ class MenuConfigTab(ttk.Frame):
             cfg[key] = self.color_rows[key].get_value()
         cfg["WindowBorderThickness"] = max(0, min(20, safe_int(
             self.border_thickness.get(), 2)))
-        cfg["FontStyle"] = self.font_style.get() or "DEFAULT"
+        cfg["Font"] = self.font_style.get() or "DEFAULT"
+        cfg["TextSize"] = self.text_size.get() or "NORMAL"
+        #! Still written, and still the one an old build reads. Kept at what
+        #! the two new fields mean so a server rolled back to 1.6.0 gets the
+        #! nearest thing rather than silently reverting to Metron Book.
+        cfg["FontStyle"] = legacy_font_style(cfg["Font"], cfg["TextSize"])
         cfg["ShowResponseIcons"] = bool(self.show_icons.get())
         cfg["ShowLanguageButton"] = bool(self.show_language.get())
         cfg["ScaleTextWithPanel"] = bool(self.scale_text.get())
         cfg["ShowErrorNotifications"] = bool(self.error_notifications.get())
+        cfg.update(self.reputation_values())
         cfg["LayoutOverride"] = self.layout_override.get().strip()
         return cfg
+
+    #! What the file gets when the Reputation tab is not up yet.
+    REPUTATION_DEFAULTS = {
+        "ShowReputationNotifications": True,
+        "BookTabName": "",
+        "BookPageTitle": "",
+        "BookColumnName": "",
+        "BookColumnStatus": "",
+        "BookColumnReputation": "",
+    }
+
+    def reputation_tab(self):
+        return getattr(self.app, "reputation_tab", None)
+
+    def reputation_values(self):
+        tab = self.reputation_tab()
+        if tab is None:
+            return dict(self.REPUTATION_DEFAULTS)
+        return tab.values()
 
     def build_output(self):
         cfg = self.gather()
         ordered = {
-            "ConfigVersion": max(self.config_version, 6),
+            "ConfigVersion": max(self.config_version, 11),
             "Position": cfg["Position"],
             "PanelWidth": cfg["PanelWidth"],
             "PanelHeight": cfg["PanelHeight"],
@@ -6705,10 +7094,20 @@ class MenuConfigTab(ttk.Frame):
         ordered["WindowBorderThickness"] = cfg["WindowBorderThickness"]
         ordered["VisitedResponseOpacity"] = cfg["VisitedResponseOpacity"]
         ordered["FontStyle"] = cfg["FontStyle"]
+        ordered["Font"] = cfg["Font"]
+        ordered["TextSize"] = cfg["TextSize"]
         ordered["ShowResponseIcons"] = cfg["ShowResponseIcons"]
         ordered["ShowLanguageButton"] = cfg["ShowLanguageButton"]
         ordered["ScaleTextWithPanel"] = cfg["ScaleTextWithPanel"]
         ordered["ShowErrorNotifications"] = cfg["ShowErrorNotifications"]
+        ordered["ScrollSpeed"] = cfg["ScrollSpeed"]
+        ordered["ShowReputationNotifications"] = cfg[
+            "ShowReputationNotifications"]
+        ordered["BookTabName"] = cfg["BookTabName"]
+        ordered["BookPageTitle"] = cfg["BookPageTitle"]
+        ordered["BookColumnName"] = cfg["BookColumnName"]
+        ordered["BookColumnStatus"] = cfg["BookColumnStatus"]
+        ordered["BookColumnReputation"] = cfg["BookColumnReputation"]
         ordered["LayoutOverride"] = cfg["LayoutOverride"]
         return ordered
 
@@ -6732,11 +7131,13 @@ class MenuConfigTab(ttk.Frame):
         self.scale_text.set(bool(data.get("ScaleTextWithPanel", False)))
         self.error_notifications.set(
             bool(data.get("ShowErrorNotifications", True)))
+        tab = self.reputation_tab()
+        if tab is not None:
+            tab.apply(data)
         self.config_version = safe_int(data.get("ConfigVersion", 0), 0)
-        style = str(data.get("FontStyle", "DEFAULT") or "DEFAULT").upper()
-        if style not in dict(FONT_STYLES):
-            style = "DEFAULT"
-        self.font_style.set(style)
+        font, size = font_and_size(data)
+        self.font_style.set(font)
+        self.text_size.set(size)
         self.on_font_style()
         self.layout_override.delete(0, tk.END)
         self.layout_override.insert(0, data.get("LayoutOverride", ""))
@@ -6810,8 +7211,9 @@ class MenuConfigTab(ttk.Frame):
                                 outline=border, width=thickness)
 
         pad = 10
-        text_scale, name_bold = FONT_STYLE_PREVIEW.get(
-            cfg.get("FontStyle", "DEFAULT"), (1.0, True))
+        preview_font, preview_size = font_and_size(cfg)
+        text_scale = TEXT_SIZE_PREVIEW.get(preview_size, 1.0)
+        name_bold = FONT_PREVIEW.get(preview_font, True)
         name_size = max(6, int(round(10 * text_scale)))
         body_size = max(6, int(round(9 * text_scale)))
 
@@ -7574,7 +7976,7 @@ class AIPatrolsTab(ttk.Frame):
     def _wp_paste(self):
         waypoints = self._current_waypoints()
         if waypoints is None:
-            messagebox.showinfo(APP_TITLE, "Select or make a patrol first.")
+            messagebox.showinfo(APP_TITLE, tr("Select or make a patrol first."))
             return
         window = tk.Toplevel(self)
         window.title("Paste waypoint coordinates")
@@ -7639,7 +8041,7 @@ class AIPatrolsTab(ttk.Frame):
         if self.selected < 0:
             return
         if not messagebox.askyesno(
-                APP_TITLE, "Remove this patrol from the file?"):
+                APP_TITLE, tr("Remove this patrol from the file?")):
             return
         del self.patrols[self.selected]
         keep = min(self.selected, len(self.patrols) - 1)
@@ -7927,7 +8329,7 @@ class FactionsTab(ttk.Frame):
         if len(self.factions) >= FACTION_MAX_SLOTS:
             messagebox.showinfo(
                 APP_TITLE,
-                "You've hit the %d-faction limit built into the mod."
+                tr("You've hit the %d-faction limit built into the mod.")
                 % FACTION_MAX_SLOTS)
             return
         faction = default_faction()
@@ -7942,7 +8344,7 @@ class FactionsTab(ttk.Frame):
         if len(self.factions) >= FACTION_MAX_SLOTS:
             messagebox.showinfo(
                 APP_TITLE,
-                "You've hit the %d-faction limit built into the mod."
+                tr("You've hit the %d-faction limit built into the mod.")
                 % FACTION_MAX_SLOTS)
             return
         clone = copy.deepcopy(self.factions[self.selected])
@@ -7956,7 +8358,7 @@ class FactionsTab(ttk.Frame):
     def _remove(self):
         if self.selected < 0:
             return
-        if not messagebox.askyesno(APP_TITLE, "Remove this faction?"):
+        if not messagebox.askyesno(APP_TITLE, tr("Remove this faction?")):
             return
         del self.factions[self.selected]
         keep = min(self.selected, len(self.factions) - 1)
@@ -8010,6 +8412,1044 @@ class FactionsTab(ttk.Frame):
             issues.append("%d factions defined; only the first %d will load."
                           % (len(self.factions), FACTION_MAX_SLOTS))
         return issues, warnings
+
+
+class FilterList(ttk.Frame):
+    """A list that can be narrowed and reordered without leaving it.
+
+    Click a column heading to sort by it, click again to reverse. Type in the
+    box to keep only the rows that mention what was typed, anywhere in them --
+    so "not yet" leaves the ones with no conversation, "Raiders" leaves one
+    faction, and a trader's name leaves that trader.
+
+    Each row carries the thing it stands for, so whatever put the rows in gets
+    them straight back instead of reading them off the screen again.
+    """
+
+    FILLER = "_filler"
+
+    #! Room for the cell's own padding, and for the sort arrow beside a
+    #! heading. Both are measured in the same font as everything else.
+    CELL_PADDING = 28
+    SORT_ROOM = 26
+    #! Wide enough for a full patrol route written out. A window narrower
+    #! than the columns need has a scrollbar; a column that lies about its
+    #! contents has nothing.
+    WIDEST = 820
+
+    def __init__(self, master, columns, height=10, numeric=()):
+        ttk.Frame.__init__(self, master)
+        #! (key, heading, narrowest). Columns are measured against what they
+        #! hold and widened to fit; slack goes to an empty column on the end,
+        #! not to whichever one is marked stretchy -- that left one enormous.
+        self.columns = columns
+        self.numeric = set(numeric)
+        self.rows = []
+        self.shown = []
+        self.sort_key = None
+        self.sort_reverse = False
+        self.needle = tk.StringVar(value="")
+        self.count = tk.StringVar(value="")
+
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", pady=(0, 3))
+        ttk.Label(bar, text="Narrow the list").pack(side="left")
+        #! Said here rather than in a manual nobody opens.
+        box = ttk.Entry(bar, textvariable=self.needle, width=26)
+        box.pack(side="left", padx=6)
+        self.needle.trace_add("write", lambda *_a: self.refresh())
+        ttk.Button(bar, text="Clear", width=6,
+                   command=lambda: self.needle.set("")).pack(side="left")
+        ttk.Label(bar,
+                  text="Click a heading to sort - right-click a row to show "
+                       "only what it says",
+                  style="Hint.TLabel").pack(side="left", padx=10)
+        ttk.Label(bar, textvariable=self.count,
+                  style="Hint.TLabel").pack(side="right")
+
+        holder = ttk.Frame(self)
+        holder.pack(fill="both", expand=True)
+        holder.rowconfigure(0, weight=1)
+        holder.columnconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(
+            holder,
+            columns=[key for key, _h, _w in columns] + [self.FILLER],
+            show="headings", selectmode="extended", height=height)
+        for key, heading, width in columns:
+            self.tree.heading(key, text=heading,
+                              command=lambda k=key: self.sort_by(k))
+            self.tree.column(key, width=width, stretch=False,
+                             minwidth=min(width, 90))
+        self.tree.heading(self.FILLER, text="")
+        self.tree.column(self.FILLER, width=10, stretch=True, minwidth=0)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+
+        down = ttk.Scrollbar(holder, orient="vertical",
+                             command=self.tree.yview)
+        down.grid(row=0, column=1, sticky="ns")
+        #! Fixed widths only work if a narrow window can still reach the last
+        #! column.
+        across = ttk.Scrollbar(holder, orient="horizontal",
+                               command=self.tree.xview)
+        across.grid(row=1, column=0, sticky="ew")
+        self.tree.configure(yscrollcommand=down.set, xscrollcommand=across.set)
+
+        #! Right-click a cell to keep only the rows that match it: the fastest
+        #! way to get from "all 75 patrols" to "the Raiders ones" is to point
+        #! at a Raiders row rather than to type the word.
+        self.menu = tk.Menu(self.tree, tearoff=0)
+        self.tree.bind("<Button-3>", self._on_right_click)
+
+    def _on_right_click(self, event):
+        row = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        self.menu.delete(0, "end")
+
+        value = ""
+        heading = ""
+        if row and column:
+            at = safe_int(column.lstrip("#"), 0) - 1
+            if 0 <= at < len(self.columns):
+                heading = self.columns[at][1]
+                index = safe_int(row, -1)
+                if 0 <= index < len(self.shown):
+                    value = str(self.shown[index][0][at]).strip()
+
+        if value:
+            self.menu.add_command(
+                label=tr("Show only “%s”") % short_one_line(value, 40),
+                command=lambda v=value: self.needle.set(v))
+            self.menu.add_command(
+                label=tr("Sort by %s") % heading,
+                command=lambda k=self.columns[at][0]: self.sort_by(k))
+            self.menu.add_separator()
+        self.menu.add_command(label=tr("Show everything"),
+                              command=lambda: self.needle.set(""))
+        _popup_menu(self.menu, event)
+        return "break"
+
+    def set_rows(self, rows):
+        """rows: [(values tuple, whatever the caller wants back)]"""
+        self.rows = list(rows)
+        self.refresh()
+        self.autosize()
+
+    def autosize(self):
+        """Make every column as wide as the widest thing in it.
+
+        Measured in the font actually on screen, not guessed from how many
+        characters the text has: the guess is wrong the moment somebody runs
+        Windows at 125%, or picks a different font, and what they see is a
+        cut-off coordinate. Measured against every row rather than only the
+        ones showing, so narrowing the list doesn't make the columns jump
+        about.
+        """
+        name = ""
+        try:
+            name = ttk.Style().lookup("Treeview", "font")
+        except tk.TclError:
+            name = ""
+        try:
+            font = tkfont.nametofont(name or "TkDefaultFont")
+        except tk.TclError:
+            return
+
+        for at, (key, heading, least) in enumerate(self.columns):
+            widest = font.measure(heading) + self.SORT_ROOM
+            for values, _payload in self.rows:
+                if at < len(values):
+                    widest = max(widest, font.measure(str(values[at])))
+            widest = min(max(widest + self.CELL_PADDING, least), self.WIDEST)
+            self.tree.column(key, width=widest, minwidth=min(widest, 90))
+
+    def sort_by(self, key):
+        if self.sort_key == key:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_key = key
+            self.sort_reverse = False
+        self.refresh()
+
+    def heading_text(self, key, heading):
+        if key != self.sort_key:
+            return heading
+        #! Which way the list is facing, without a legend to explain it.
+        if self.sort_reverse:
+            return heading + "  ▼"
+        return heading + "  ▲"
+
+    def refresh(self):
+        needle = self.needle.get().strip().lower()
+        keys = [key for key, _h, _w in self.columns]
+
+        shown = []
+        for values, payload in self.rows:
+            if needle:
+                haystack = " ".join(str(v) for v in values).lower()
+                if needle not in haystack:
+                    continue
+            shown.append((values, payload))
+
+        if self.sort_key in keys:
+            at = keys.index(self.sort_key)
+
+            def order(row):
+                value = row[0][at]
+                if self.sort_key in self.numeric:
+                    return (0, safe_float(value, 0.0), "")
+                return (1, 0.0, str(value).lower())
+
+            shown.sort(key=order, reverse=self.sort_reverse)
+
+        self.shown = shown
+        self.tree.delete(*self.tree.get_children())
+        for index, (values, _payload) in enumerate(shown):
+            self.tree.insert("", "end", iid=str(index), values=values)
+
+        for key, heading, _w in self.columns:
+            self.tree.heading(key, text=self.heading_text(key, heading))
+
+        if len(shown) == len(self.rows):
+            self.count.set("%d shown" % len(shown))
+        else:
+            self.count.set("%d of %d shown" % (len(shown), len(self.rows)))
+
+    def selected(self):
+        picked = []
+        for item in self.tree.selection():
+            index = safe_int(item, -1)
+            if 0 <= index < len(self.shown):
+                picked.append(self.shown[index][1])
+        return picked
+
+    def select_where(self, wanted):
+        """Select every visible row whose payload `wanted` says yes to."""
+        chosen = [str(i) for i, (_v, payload) in enumerate(self.shown)
+                  if wanted(payload)]
+        self.tree.selection_set(chosen)
+        if chosen:
+            self.tree.see(chosen[0])
+        return len(chosen)
+
+    def payloads(self):
+        return [payload for _values, payload in self.rows]
+
+
+class ImportTab(ttk.Frame):
+    """Bring the characters a server already has into the editor.
+
+    Nothing here changes what the server has. It reads the trader maps, the
+    P2P traders, the quest NPCs and Expansion's AI patrols, works out who has
+    no conversation yet, and writes a starter one already wired to that
+    character -- so the only thing left to do is write what they say.
+    """
+
+    def __init__(self, master, app):
+        ttk.Frame.__init__(self, master)
+        self.app = app
+        self.rows = []
+        self.patrol_files = []
+        self.patrol_rows = []
+        self.summary = tk.StringVar(value="")
+        self.patrol_note = tk.StringVar(value="")
+        self.share_one = tk.BooleanVar(value=True)
+        self.remove_originals = tk.BooleanVar(value=False)
+
+        ttk.Label(
+            self,
+            text="Everyone your server already has, and whether they can talk "
+                 "yet. Pick the ones you want and DialogueForge writes each a "
+                 "starter conversation - already pointed at that trader, NPC "
+                 "or patrol - so all that's left is writing what they say. "
+                 "Click a column heading to sort by it; type in the box above "
+                 "a list to narrow it.",
+            wraplength=1100, style="Hint.TLabel").pack(
+            anchor="w", padx=10, pady=(8, 6))
+
+        split = ttk.PanedWindow(self, orient="vertical")
+        split.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        #! Put the divider a little past halfway the first time there is a
+        #! real height to divide. Left to itself the top list opens two rows
+        #! tall, and that list is the reason to be on this tab. Dragged once,
+        #! it stays where it was put.
+        self.split = split
+        self.sash_placed = False
+        split.bind("<Configure>", self.place_sash)
+
+        # ---- who is out there
+        people = ttk.LabelFrame(split,
+                                text="Traders, P2P traders and quest NPCs",
+                                style="Section.TLabelframe")
+        split.add(people, weight=3)
+
+        bar = ttk.Frame(people)
+        bar.pack(fill="x", padx=8, pady=(6, 4))
+        ttk.Button(bar, text="Look at my server",
+                   command=self.scan).pack(side="left")
+        ttk.Button(bar, text="Pick everyone who can't talk yet",
+                   command=self.select_missing).pack(side="left", padx=6)
+        ttk.Button(bar, text="Write starter conversations",
+                   command=self.create_selected).pack(side="left")
+        ttk.Button(bar, text="Open the one I picked",
+                   command=self.open_selected).pack(side="left", padx=6)
+        ttk.Label(bar, textvariable=self.summary,
+                  style="Hint.TLabel").pack(side="right")
+
+        self.people_list = FilterList(people, [
+            ("what", "What", 100),
+            ("name", "Name", 140),
+            ("where", "Where it's set up", 200),
+            ("talks", "Can talk?", 90)], height=9)
+        self.people_list.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        # ---- AI patrols
+        patrols = ttk.LabelFrame(split, text="Expansion AI patrols",
+                                 style="Section.TLabelframe")
+        split.add(patrols, weight=2)
+
+        ttk.Label(
+            patrols,
+            text="Every patrol in your AIPatrolSettings.json. Pick the squads "
+                 "you want talking and leave the rest alone. A patrol that "
+                 "spawns on an object rather than walking a route can't be "
+                 "made talkable - Expansion builds those routes as the map "
+                 "loads, so there is nothing for the mod to spawn.",
+            wraplength=1080, style="Hint.TLabel").pack(
+            anchor="w", padx=8, pady=(6, 4))
+
+        pbar = ttk.Frame(patrols)
+        pbar.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Button(pbar, text="Read my patrol file",
+                   command=self.scan_patrols).pack(side="left")
+        ttk.Button(pbar, text="Pick every one that can talk",
+                   command=self.select_usable_patrols).pack(side="left",
+                                                            padx=6)
+        ttk.Button(pbar, text="Make the picked ones talkable",
+                   command=self.convert_picked).pack(side="left")
+        ttk.Button(pbar, text="Clean up the ones that spawn twice",
+                   command=self.delete_duplicates).pack(side="left", padx=6)
+        ttk.Label(pbar, textvariable=self.patrol_note,
+                  style="Hint.TLabel").pack(side="right")
+
+        self.patrol_list = FilterList(patrols, [
+            ("name", "Name", 140),
+            ("faction", "Faction", 90),
+            ("loadout", "Loadout", 120),
+            ("count", "AI", 45),
+            ("where", "Where it spawns", 160),
+            ("state", "Can be made talkable?", 160)],
+            height=8, numeric=("count",))
+        self.patrol_list.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+
+        #! Said as a question with Yes and No rather than a box to tick: a
+        #! tick never says which way round it means, and one of these two
+        #! deletes from a file the server needs.
+        orow = ttk.Frame(patrols)
+        orow.pack(fill="x", padx=8, pady=(0, 6))
+
+        share = ttk.LabelFrame(orow, text="One conversation for all of them?",
+                               style="Section.TLabelframe")
+        share.pack(side="left")
+        ttk.Radiobutton(share, text="Yes - they all say the same thing",
+                        variable=self.share_one,
+                        value=True).pack(side="left", padx=6, pady=3)
+        ttk.Radiobutton(share, text="No - one conversation each",
+                        variable=self.share_one,
+                        value=False).pack(side="left", padx=6, pady=3)
+
+        remove = ttk.LabelFrame(
+            orow, text="Delete them from AIPatrolSettings.json afterwards?",
+            style="Section.TLabelframe")
+        remove.pack(side="left", padx=14)
+        ttk.Radiobutton(remove, text="No - I'll delete them myself",
+                        variable=self.remove_originals,
+                        value=False).pack(side="left", padx=6, pady=3)
+        ttk.Radiobutton(remove, text="Yes - delete them (a .bak copy is kept)",
+                        variable=self.remove_originals,
+                        value=True).pack(side="left", padx=6, pady=3)
+
+        paste_section = CollapsibleSection(
+            patrols, "Or paste a single patrol from somewhere else",
+            expanded=False)
+        paste_section.pack(fill="x", padx=8, pady=(0, 6))
+        pasted = paste_section.content()
+
+        ttk.Label(
+            pasted,
+            text="Everything from a patrol's opening { to its matching }. "
+                 "Use this for a patrol that isn't in the file above - one "
+                 "from a guide, or from another server.",
+            wraplength=1040, style="Hint.TLabel").pack(anchor="w", padx=6,
+                                                       pady=(4, 4))
+        self.paste = tk.Text(pasted, height=6, wrap="none", undo=True)
+        self.paste.pack(fill="x", padx=6)
+        ttk.Button(pasted, text="Convert what I pasted",
+                   command=self.convert_pasted).pack(anchor="w", padx=6,
+                                                     pady=6)
+
+    # ------------------------------------------------------------ the people
+
+    def place_sash(self, _event=None):
+        if self.sash_placed:
+            return
+        height = self.split.winfo_height()
+        if height < 400:
+            return
+        self.sash_placed = True
+        try:
+            self.split.sashpos(0, int(height * 0.5))
+        except Exception:
+            pass
+
+    def refresh(self):
+        if self.app.profile_path.get():
+            self.scan()
+
+    def profile_ready(self):
+        root = self.app.profile_path.get()
+        if root and os.path.isdir(root):
+            return True
+        messagebox.showinfo(
+            APP_TITLE,
+            tr("Pick your profile folder first - the DialogFramework folder in "
+            "your server profile, the one with MenuConfig.json in it.\n\nThat "
+            "is where the conversations are written, and it's how "
+            "DialogueForge finds your server."))
+        return False
+
+    def scan(self):
+        self.rows = []
+
+        profile = self.app.profile_path.get()
+        if not profile:
+            self.summary.set("No profile folder picked yet.")
+            return
+
+        if not self.app.npc_index:
+            self.app.scan_quests(announce=False)
+
+        seen = set()
+        for root in self.app.server_roots():
+            rows, _have = import_candidates(root, profile, self.app.npc_index)
+            for row in rows:
+                key = (row["kind"], row["name"], row["where"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                self.rows.append(row)
+
+        #! Quest NPCs come from the quest folder, which the author points at
+        #! directly, so they are found even when the server root guess missed.
+        if not any(row["kind"] == "npc" for row in self.rows):
+            rows, _have = import_candidates("", profile, self.app.npc_index)
+            self.rows.extend(row for row in rows if row["kind"] == "npc")
+
+        self.people_list.set_rows(
+            [((IMPORT_KIND_LABELS.get(row["kind"], row["kind"]),
+               row["name"], row["where"],
+               tr("yes") if row["has"] else tr("not yet")), row)
+             for row in self.rows])
+
+        missing = sum(1 for row in self.rows if not row["has"])
+        if not self.rows:
+            self.summary.set(tr("Nothing found - check the profile folder "
+                                "and the quest folder on the Server files "
+                                "tab."))
+        else:
+            self.summary.set(tr("%d found, %d can't talk yet")
+                             % (len(self.rows), missing))
+
+        self.scan_patrols()
+
+    def select_missing(self):
+        if not self.rows:
+            self.scan()
+        self.people_list.select_where(lambda row: not row["has"])
+
+    def selected_rows(self):
+        return self.people_list.selected()
+
+    # ----------------------------------------------------------- the patrols
+
+    def scan_patrols(self):
+        """Read Expansion's own patrol file and show what is in it."""
+        self.patrol_files = []
+        for root in self.app.server_roots():
+            self.patrol_files.extend(find_expansion_patrol_files(root))
+
+        mine = self.existing_patrols()
+        already = set(self.patrol_key(patrol) for patrol in mine)
+
+        self.patrol_rows = []
+        for entry in self.patrol_files:
+            try:
+                with open(entry["path"], "r", encoding="utf-8-sig") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError):
+                continue
+            for index, patrol in enumerate(expansion_patrols(data)):
+                self.patrol_rows.append({
+                    "patrol": patrol,
+                    "path": entry["path"],
+                    "mission": entry["mission"],
+                    "index": index,
+                    "blocker": patrol_blocker(patrol),
+                    "already": self.patrol_key(patrol) in already,
+                })
+
+        self.patrol_list.set_rows(
+            [(self.patrol_values(row), row) for row in self.patrol_rows])
+
+        usable = sum(1 for row in self.patrol_rows
+                     if not row["blocker"] and not row["already"])
+        duplicates = sum(1 for row in self.patrol_rows if row["already"])
+        if not self.patrol_files:
+            self.patrol_note.set(tr("No AIPatrolSettings.json found yet."))
+        elif duplicates:
+            #! Said first, because it is costing them AI right now.
+            self.patrol_note.set(
+                tr("%d already talkable and still in this file - they spawn "
+                   "twice. %d more can be made talkable.")
+                % (duplicates, usable))
+        else:
+            self.patrol_note.set(
+                tr("%d patrol(s) in %s, %d can be made talkable")
+                % (len(self.patrol_rows), self.patrol_files[0]["mission"],
+                   usable))
+
+    @staticmethod
+    def patrol_values(row):
+        """One patrol as the list shows it."""
+        patrol = row["patrol"]
+
+        name = str(patrol.get("Name") or "").strip() or tr("(unnamed)")
+        loadout = str(patrol.get("Loadout") or "").strip()
+        if not loadout:
+            loadout = tr("(faction default)")
+
+        count = safe_int(patrol.get("NumberOfAI"), 0)
+        most = safe_int(patrol.get("NumberOfAIMax"), 0)
+        if most > count:
+            people = "%d-%d" % (count, most)
+        else:
+            people = "%d" % count
+
+        #! Every waypoint, written out. There is room for them on any normal
+        #! window, and "+3 more" tells nobody where the patrol actually walks
+        #! -- which is the one thing this column exists to say.
+        where = ""
+        waypoints = patrol.get("Waypoints")
+        if isinstance(waypoints, list) and waypoints:
+            spots = []
+            for point in waypoints:
+                if isinstance(point, list) and len(point) >= 3:
+                    spots.append("%.0f, %.0f" % (safe_float(point[0], 0.0),
+                                                 safe_float(point[2], 0.0)))
+            where = "  |  ".join(spots)
+        elif str(patrol.get("ObjectClassName") or "").strip():
+            where = str(patrol.get("ObjectClassName"))
+
+        if row["already"]:
+            #! It is in this file AND in the mod's own, so the game spawns
+            #! the squad twice -- which is worth saying plainly.
+            state = tr("already talkable - spawns twice until deleted here")
+        elif row["blocker"]:
+            state = tr("no - %s") % row["blocker"]
+        else:
+            state = tr("yes")
+
+        return (name, str(patrol.get("Faction") or ""), loadout, people,
+                where, state)
+
+    def select_usable_patrols(self):
+        if not self.patrol_rows:
+            self.scan_patrols()
+        picked = self.patrol_list.select_where(
+            lambda row: not row["blocker"] and not row["already"])
+        if not picked:
+            messagebox.showinfo(
+                APP_TITLE,
+                tr("Nothing here can be made talkable. Patrols that spawn on "
+                   "objects have no waypoints of their own, and ones already "
+                   "imported are left alone."))
+
+    def delete_duplicates(self):
+        """Take out the patrols that are talkable already and still sitting in
+        Expansion's file, where they spawn a second copy of the same squad."""
+        if not self.profile_ready():
+            return
+
+        doubled = [row for row in self.patrol_rows if row["already"]]
+        if not doubled:
+            messagebox.showinfo(
+                APP_TITLE,
+                tr("Nothing is spawning twice. Every patrol here is either "
+                   "not talkable yet, or talkable and already gone from this "
+                   "file."))
+            return
+
+        names = "\n".join("   %s" % (str(row["patrol"].get("Name") or "").strip()
+                                     or tr("(unnamed)"))
+                          for row in doubled[:12])
+        if len(doubled) > 12:
+            names += "\n" + tr("   ...and %d more.") % (len(doubled) - 12)
+
+        if not messagebox.askyesno(
+                APP_TITLE,
+                tr("%d patrol(s) are talkable already but are still in your "
+                   "AIPatrolSettings.json, so each one spawns twice:\n\n%s\n\n"
+                   "Delete them from AIPatrolSettings.json? Your talkable "
+                   "copies are not touched, and a .bak of the file is kept "
+                   "beside it.") % (len(doubled), names)):
+            return
+
+        removed, backups = self.remove_from_source(doubled)
+        self.scan_patrols()
+
+        if not removed:
+            return
+
+        lines = [tr("%d deleted from AIPatrolSettings.json. They spawn once "
+                    "now, and still talk.") % removed]
+        for backup in backups[:4]:
+            lines.append(tr("   The file as it was: %s") % backup)
+        messagebox.showinfo(APP_TITLE, "\n".join(lines))
+        self.app.set_status("Cleaned up %d duplicate patrol(s)" % removed)
+
+    def convert_picked(self):
+        if not self.profile_ready():
+            return
+        picked = self.patrol_list.selected()
+        if not picked:
+            messagebox.showinfo(
+                APP_TITLE,
+                tr("No patrols picked.\n\nClick the ones you want (hold Ctrl "
+                   "for more than one), or press \"Pick every one that can "
+                   "talk\"."))
+            return
+
+        source = picked[0]["path"]
+        self.convert([row["patrol"] for row in picked],
+                     share_one=self.share_one.get(), source=source,
+                     picked=picked)
+
+    def open_selected(self):
+        picked = self.selected_rows()
+        if len(picked) != 1:
+            messagebox.showinfo(
+                APP_TITLE, tr("Pick exactly one row to open."))
+            return
+        path = self.conversation_for(picked[0])
+        if not path:
+            messagebox.showinfo(
+                APP_TITLE,
+                tr("%s has no conversation yet.\n\nPick the row and press "
+                "\"Write starter conversations\" first.")
+                % (picked[0]["name"] or "That one"))
+            return
+        self.app.load_path(path)
+
+    def conversation_for(self, row):
+        """The file that speaks for this one, or "" when none does. A folder
+        can hold more than one conversation, so the keys decide, not the
+        file name."""
+        folder = os.path.dirname(
+            import_target_path(row["kind"], row["payload"],
+                               self.app.profile_path.get()))
+        if not os.path.isdir(folder):
+            return ""
+
+        fallback = ""
+        for name in sorted(os.listdir(folder)):
+            if not name.lower().endswith(".json"):
+                continue
+            path = os.path.join(folder, name)
+            try:
+                with open(path, "r", encoding="utf-8-sig") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict) or "Nodes" not in data:
+                continue
+            if self.tree_speaks_for(row, data):
+                return path
+            fallback = fallback or path
+        return fallback
+
+    @staticmethod
+    def tree_speaks_for(row, data):
+        payload = row["payload"]
+        if row["kind"] == "trader":
+            markets = [str(m).strip().lower()
+                       for m in (data.get("TraderIDs") or [])]
+            if str(payload.get("market", "")).strip().lower() not in markets:
+                return False
+            spots = [str(s).strip() for s in (data.get("TraderPositions") or [])]
+            return not spots or any(spot in spots
+                                    for spot in (payload.get("positions") or []))
+        if row["kind"] == "p2p":
+            return safe_int(payload.get("id"), -1) in [
+                safe_int(i, -2) for i in (data.get("P2PTraderIDs") or [])]
+        if row["kind"] == "npc":
+            return safe_int(payload.get("id"), -1) in [
+                safe_int(i, -2) for i in (data.get("NPCIDs") or [])]
+        return False
+
+    def create_selected(self):
+        if not self.profile_ready():
+            return
+        picked = self.selected_rows()
+        if not picked:
+            messagebox.showinfo(
+                APP_TITLE,
+                tr("Nothing picked.\n\nPress \"Pick everyone who can't talk "
+                "yet\", or click the rows you want (hold Ctrl for more than "
+                "one)."))
+            return
+
+        profile = self.app.profile_path.get()
+        taken = set(scan_conversations(profile)["tree_ids"])
+        written = []
+        skipped = []
+
+        for row in picked:
+            if row["has"]:
+                skipped.append(tr("%s can already talk") % row["name"])
+                continue
+            #! Not the same as "the file is there": two traders can share a
+            #! label, and so a folder, while needing a conversation each.
+            path = free_file(import_target_path(row["kind"], row["payload"],
+                                                profile))
+            tree_id = next_free_id(taken)
+            taken.add(tree_id)
+            tree = starter_tree(row["kind"], row["payload"], tree_id,
+                                row.get("twins", 1))
+            try:
+                write_json(path, tree)
+            except OSError as error:
+                skipped.append(tr("%s could not be written (%s)")
+                               % (row["name"], error))
+                continue
+            written.append((row, path))
+
+        self.app.scan_files()
+        self.scan()
+
+        #! Each line is translated on its own -- a report built by joining
+        #! finished sentences together can never be looked up as one string.
+        lines = []
+        if written:
+            lines.append(tr("Written %d starter conversation(s):")
+                         % len(written))
+            for row, path in written[:12]:
+                lines.append("   %s  ->  %s"
+                             % (row["name"],
+                                os.path.relpath(path, profile)))
+            if len(written) > 12:
+                lines.append(tr("   ...and %d more.") % (len(written) - 12))
+            lines.append("")
+            lines.append(tr("Each one opens with a placeholder line and the "
+                            "options that character can use. Open one on the "
+                            "Dialogue tab and write what they actually say."))
+        if skipped:
+            lines.append("")
+            lines.append(tr("Left alone (%d):") % len(skipped))
+            for note in skipped[:12]:
+                lines.append("   %s" % note)
+            if len(skipped) > 12:
+                lines.append(tr("   ...and %d more.") % (len(skipped) - 12))
+
+        while lines and not lines[0]:
+            lines.pop(0)
+        messagebox.showinfo(APP_TITLE,
+                            "\n".join(lines) or tr("Nothing to do."))
+        self.app.set_status("Imported %d character(s)" % len(written))
+
+    # ------------------------------------------------------------ the patrols
+
+    def patrol_path(self):
+        return os.path.join(self.app.profile_path.get() or "", "AIPatrol",
+                            "AIPatrols.json")
+
+    def existing_patrols(self):
+        """What the mod's own patrol file holds now."""
+        try:
+            with open(self.patrol_path(), "r", encoding="utf-8-sig") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            return []
+        return expansion_patrols(data)
+
+    def convert_pasted(self):
+        if not self.profile_ready():
+            return
+        raw = self.paste.get("1.0", "end").strip().rstrip(",")
+        if not raw:
+            messagebox.showinfo(
+                APP_TITLE,
+                tr("Paste a patrol first.\n\nOpen your AIPatrolSettings.json, "
+                "copy one patrol - everything from its opening { to its "
+                "matching } - and paste it in the box."))
+            return
+        try:
+            data = json.loads(raw)
+        except ValueError as error:
+            messagebox.showerror(
+                APP_TITLE,
+                tr("That isn't a complete patrol:\n\n%s\n\nCopy from the "
+                "patrol's opening { to its matching }, with nothing left "
+                "hanging off either end.") % error)
+            return
+
+        patrols = expansion_patrols(data)
+        if not patrols:
+            messagebox.showerror(
+                APP_TITLE,
+                tr("Nothing that looks like a patrol in there. A patrol has a "
+                "Faction and a Waypoints list."))
+            return
+        self.convert(patrols, share_one=False)
+
+    def remove_from_source(self, rows):
+        """Take the patrols we just copied out of Expansion's own file.
+
+        A copy of the file is kept beside it first. The patrol at each spot is
+        checked before it goes, so a file edited since it was read can't have
+        the wrong squad deleted out of it -- the spots would have shifted.
+        """
+        removed = 0
+        backups = []
+
+        by_file = {}
+        for row in rows:
+            by_file.setdefault(row["path"], []).append(row)
+
+        for path, entries in by_file.items():
+            try:
+                with open(path, "r", encoding="utf-8-sig") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError) as error:
+                messagebox.showerror(
+                    APP_TITLE, tr("Couldn't read that file:\n\n%s") % error)
+                continue
+
+            patrols = data.get("Patrols")
+            if not isinstance(patrols, list):
+                continue
+
+            #! Highest spot first, so removing one doesn't move the next.
+            wanted = sorted(entries, key=lambda row: row["index"],
+                            reverse=True)
+            stale = False
+            for row in wanted:
+                index = row["index"]
+                if index >= len(patrols) or \
+                        self.patrol_key(patrols[index]) != \
+                        self.patrol_key(row["patrol"]):
+                    stale = True
+                    break
+
+            if stale:
+                messagebox.showwarning(
+                    APP_TITLE,
+                    tr("%s has changed since it was read, so nothing was "
+                       "deleted from it. Press \"Read my patrol file\" and "
+                       "pick again.") % os.path.basename(path))
+                continue
+
+            backup = free_file(path + ".bak")
+            try:
+                shutil.copy2(path, backup)
+            except OSError as error:
+                messagebox.showerror(
+                    APP_TITLE,
+                    tr("Couldn't make a backup of %s, so nothing was "
+                       "deleted:\n\n%s") % (os.path.basename(path), error))
+                continue
+
+            for row in wanted:
+                del patrols[row["index"]]
+                removed += 1
+
+            try:
+                write_json(path, data)
+            except OSError as error:
+                messagebox.showerror(
+                    APP_TITLE, tr("Couldn't write %s:\n\n%s") % (path, error))
+                continue
+            backups.append(backup)
+
+        return removed, backups
+
+    def convert(self, patrols, share_one, source="", picked=None):
+        """Copy patrols into the mod's own file and give them conversations."""
+        profile = self.app.profile_path.get()
+        mine = self.existing_patrols()
+        used_dialogue = set(safe_int(p.get("DialogueID"), 0) for p in mine)
+        used_dialogue.update(scan_conversations(profile)["patrol_ids"])
+        taken_trees = set(scan_conversations(profile)["tree_ids"])
+
+        already = set()
+        for patrol in mine:
+            already.add(self.patrol_key(patrol))
+
+        added = []
+        added_rows = []
+        blocked = []
+        duplicates = 0
+        shared_id = 0
+        shared_tree = ""
+
+        for at, patrol in enumerate(patrols):
+            why = patrol_blocker(patrol)
+            if why:
+                blocked.append((patrol.get("Name") or tr("(unnamed)"), why))
+                continue
+            if self.patrol_key(patrol) in already:
+                duplicates += 1
+                continue
+
+            if share_one and shared_id:
+                dialogue_id = shared_id
+            else:
+                dialogue_id = next_free_id(used_dialogue)
+                used_dialogue.add(dialogue_id)
+
+            converted = talkable_patrol(patrol, dialogue_id)
+            if not str(converted.get("Name") or "").strip():
+                converted["Name"] = "Imported patrol %d" % dialogue_id
+            mine.append(converted)
+            already.add(self.patrol_key(converted))
+            added.append(converted)
+            #! Only what actually went in may be taken out of the original.
+            if picked and at < len(picked):
+                added_rows.append(picked[at])
+
+            if share_one and shared_id:
+                continue
+            shared_id = dialogue_id if share_one else 0
+
+            payload = {"DialogueID": dialogue_id,
+                       "Name": ("Talkable AI" if share_one
+                                else converted.get("Name")),
+                       "greeting": STARTER_LINES["patrol"]}
+            tree_path = import_target_path("patrol", payload, profile)
+            if os.path.isfile(tree_path):
+                tree_path = os.path.join(
+                    os.path.dirname(tree_path),
+                    "%s_%d.json" % (folder_safe(payload["Name"], "Patrol"),
+                                    dialogue_id))
+            tree_id = next_free_id(taken_trees)
+            taken_trees.add(tree_id)
+            try:
+                write_json(tree_path, starter_tree("patrol", payload, tree_id))
+            except OSError as error:
+                blocked.append((payload["Name"],
+                                tr("its conversation couldn't be written "
+                                   "(%s)") % error))
+                continue
+            if share_one:
+                shared_tree = tree_path
+            else:
+                shared_tree = shared_tree or tree_path
+
+        if added:
+            try:
+                write_json(self.patrol_path(), {"Patrols": mine})
+            except OSError as error:
+                messagebox.showerror(
+                    APP_TITLE,
+                    tr("Couldn't write %s:\n\n%s") % (self.patrol_path(), error))
+                return
+
+        #! Only ever after the copies are safely written.
+        removed = 0
+        backups = []
+        if added_rows and self.remove_originals.get():
+            if messagebox.askyesno(
+                    APP_TITLE,
+                    tr("Delete %d patrol(s) from your AIPatrolSettings.json "
+                       "now that they have been copied?\n\nA copy of the file "
+                       "is kept beside it as .bak, so this can be undone by "
+                       "hand.") % len(added_rows)):
+                removed, backups = self.remove_from_source(added_rows)
+
+        self.app.scan_files()
+        if added:
+            self.app.ai_patrols_tab.load({"Patrols": mine})
+            self.app.mark_loaded(self.app.ai_patrols_tab, self.patrol_path())
+        self.scan_patrols()
+
+        #! One translated sentence per line, never a paragraph glued together
+        #! out of finished ones -- see create_selected.
+        lines = []
+        if added:
+            lines.append(
+                tr("%d patrol(s) copied into AIPatrol\\AIPatrols.json.")
+                % len(added))
+            if share_one:
+                lines.append(
+                    tr("They all use the same conversation, so every one of "
+                       "them says the same thing. Open %s on the Dialogue tab "
+                       "to write it.")
+                    % os.path.relpath(shared_tree, profile))
+            else:
+                lines.append(tr("Each one got its own conversation under "
+                                "Dialogues\\AI."))
+            lines.append("")
+            if removed:
+                lines.append(tr("%d were deleted from your "
+                                "AIPatrolSettings.json, so they spawn once "
+                                "and only once.") % removed)
+                for backup in backups[:4]:
+                    lines.append(tr("   The file as it was: %s") % backup)
+            else:
+                lines.append(tr("IMPORTANT: the patrols were copied, not "
+                                "moved. Delete the ones you brought over "
+                                "from"))
+                lines.append("   %s"
+                             % (source or tr("your AIPatrolSettings.json")))
+                lines.append(tr("or both copies will spawn and you'll get "
+                                "twice the AI standing on top of each "
+                                "other."))
+        if duplicates:
+            lines.append("")
+            lines.append(tr("%d were already in your patrol file, so they "
+                            "were left alone.") % duplicates)
+        if blocked:
+            lines.append("")
+            lines.append(tr("%d couldn't be made talkable:") % len(blocked))
+            for name, why in blocked[:10]:
+                lines.append("   %s - %s" % (name, why))
+            if len(blocked) > 10:
+                lines.append(tr("   ...and %d more.") % (len(blocked) - 10))
+        if not added and not duplicates and not blocked:
+            lines.append(tr("Nothing to bring over."))
+
+        while lines and not lines[0]:
+            lines.pop(0)
+        messagebox.showinfo(APP_TITLE, "\n".join(lines))
+        self.app.set_status("Imported %d patrol(s)" % len(added))
+        if added:
+            self.paste.delete("1.0", "end")
+
+    @staticmethod
+    def patrol_key(patrol):
+        """Enough of a patrol to tell it from the others: what it is and
+        where it walks."""
+        waypoints = patrol.get("Waypoints")
+        if not isinstance(waypoints, list):
+            waypoints = []
+        spots = []
+        for point in waypoints[:4]:
+            if isinstance(point, list):
+                spots.append(",".join("%.1f" % safe_float(v, 0.0)
+                                      for v in point))
+        return (str(patrol.get("Faction") or ""),
+                str(patrol.get("Loadout") or ""),
+                safe_int(patrol.get("NumberOfAI"), 0),
+                "|".join(spots))
 
 
 class TranslationsTab(ttk.Frame):
@@ -8371,7 +9811,11 @@ class TranslationsTab(ttk.Frame):
             text = (store.get(self.cache_key(entry)) or "").strip()
             if not text:
                 continue
-            record = {"Key": entry["key"], "Text": text}
+            #! 1023 bytes is only ~500 Russian or ~340 Chinese letters.
+            first, more = split_long_text(text)
+            record = {"Key": entry["key"], "Text": first}
+            if more:
+                record["TextMore"] = more
             if entry["scope"] == "quest":
                 quest_entries.setdefault(entry["quest_id"], []).append(record)
             else:
@@ -8413,7 +9857,8 @@ class TranslationsTab(ttk.Frame):
         for block in data.get("Trees") or []:
             for record in block.get("Entries") or []:
                 key = str(record.get("Key", ""))
-                text = str(record.get("Text", ""))
+                text = join_long_text(str(record.get("Text", "")),
+                                      record.get("TextMore"))
                 if key and text:
                     store["t|" + key] = text
                     count += 1
@@ -8422,7 +9867,8 @@ class TranslationsTab(ttk.Frame):
             quest_id = safe_int(block.get("QuestID", 0), 0)
             for record in block.get("Entries") or []:
                 key = str(record.get("Key", ""))
-                text = str(record.get("Text", ""))
+                text = join_long_text(str(record.get("Text", "")),
+                                      record.get("TextMore"))
                 if key and text:
                     store["q%d|%s" % (quest_id, key)] = text
                     count += 1
@@ -8619,8 +10065,9 @@ class LivePreviewWindow(tk.Toplevel):
                 [int(cfg["ResponseTextColor"][0]
                      * cfg["VisitedResponseOpacity"])] +
                 list(cfg["ResponseTextColor"][1:4]), option_bg)
-            scale, name_bold = FONT_STYLE_PREVIEW.get(
-                cfg.get("FontStyle", "DEFAULT"), (1.0, True))
+            live_font, live_size = font_and_size(cfg)
+            scale = TEXT_SIZE_PREVIEW.get(live_size, 1.0)
+            name_bold = FONT_PREVIEW.get(live_font, True)
         else:
             bg = skin["preview_screen"]
             border = skin["preview_edge"]
@@ -8826,17 +10273,17 @@ class SaveAsDialog(tk.Toplevel):
         key = self.key_var.get().strip()
         if kind == "NPC" and safe_int(key, 0) <= 0:
             messagebox.showwarning(
-                APP_TITLE, "Enter the quest NPC ID for the new folder.",
+                APP_TITLE, tr("Enter the quest NPC ID for the new folder."),
                 parent=self)
             return
         if kind == "TRADER" and not key:
             messagebox.showwarning(
-                APP_TITLE, "Enter the trader definition name.", parent=self)
+                APP_TITLE, tr("Enter the trader definition name."), parent=self)
             return
         if kind == "SHARED" and not key:
             messagebox.showwarning(
                 APP_TITLE,
-                "Shared trees must list every NPC ID that uses them.",
+                tr("Shared trees must list every NPC ID that uses them."),
                 parent=self)
             return
 
@@ -8876,6 +10323,9 @@ class App(tk.Tk):
         self.theme_name = "dark"
         self.ui_language = "english"
         self.dirty_editors = set()
+        #! editor id -> file_stamp of the file it last loaded or saved. The
+        #! single-file tabs check it before saving over what's on disk.
+        self.loaded_files = {}
         self.preview_window = None
         self.ready = False
         self.load_settings()
@@ -8899,10 +10349,14 @@ class App(tk.Tk):
         self.dialogue_tab = DialogueTab(self.notebook, self)
         self.quest_tab = QuestTextTab(self.notebook, self)
         self.menu_tab = MenuConfigTab(self.notebook, self)
+        #! After the appearance tab: that one reads this one's boxes when it
+        #! saves, and they share MenuConfig.json.
+        self.reputation_tab = ReputationTab(self.notebook, self)
         self.ai_settings_tab = AISettingsTab(self.notebook, self)
         self.factions_tab = FactionsTab(self.notebook, self)
         self.ai_patrols_tab = AIPatrolsTab(self.notebook, self)
         self.translations_tab = TranslationsTab(self.notebook, self)
+        self.import_tab = ImportTab(self.notebook, self)
         self.files_tab = ttk.Frame(self.notebook)
         self._build_files_tab(self.files_tab)
 
@@ -8910,9 +10364,11 @@ class App(tk.Tk):
         self.notebook.add(self.quest_tab, text="  Quest wording  ")
         self.notebook.add(self.translations_tab, text="  Translations  ")
         self.notebook.add(self.menu_tab, text="  Menu appearance  ")
+        self.notebook.add(self.reputation_tab, text="  Reputation  ")
         self.notebook.add(self.ai_settings_tab, text="  Global AI settings  ")
         self.notebook.add(self.factions_tab, text="  Factions  ")
         self.notebook.add(self.ai_patrols_tab, text="  AI patrols  ")
+        self.notebook.add(self.import_tab, text="  Import  ")
         self.notebook.add(self.files_tab, text="  Server files  ")
 
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
@@ -8928,6 +10384,11 @@ class App(tk.Tk):
         self.apply_theme()
         self.apply_language()
         self.scan_quests(announce=False)
+        #! Read the real files before anything can be saved over them. Only
+        #! choosing a folder used to do this, so a restart left four tabs on
+        #! their defaults, and saving one replaced every setting in its file.
+        if self.profile_path.get():
+            self.auto_load_menu_config()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.dirty_editors.clear()
         self.refresh_title()
@@ -8992,7 +10453,9 @@ class App(tk.Tk):
         self.ui_language_box.bind("<<ComboboxSelected>>",
                                   lambda _e: self.on_ui_language_change())
 
-        ttk.Button(top, text="Live preview", width=13,
+        #! No fixed width -- 13 characters fits "Live preview" and cuts the
+        #! Russian off halfway.
+        ttk.Button(top, text="Live preview",
                    command=self.toggle_preview).pack(side="right", padx=6)
 
         folders = ttk.Frame(top)
@@ -9052,6 +10515,8 @@ class App(tk.Tk):
             return
         if widget is self.translations_tab:
             self.translations_tab.refresh_source()
+        elif widget is self.import_tab:
+            self.import_tab.refresh()
 
     def on_mouse_wheel(self, event):
         widget = self.winfo_containing(event.x_root, event.y_root)
@@ -9094,8 +10559,8 @@ class App(tk.Tk):
             self.clipboard_append(url)
             messagebox.showinfo(
                 APP_TITLE,
-                "Couldn't open a browser, so the link is on your "
-                "clipboard instead:\n\n%s" % url)
+                tr("Couldn't open a browser, so the link is on your "
+                "clipboard instead:\n\n%s") % url)
 
     # ---------------- expansion quest index
 
@@ -9291,10 +10756,10 @@ class App(tk.Tk):
             return True
         if not messagebox.askyesno(
                 APP_TITLE,
-                "No Expansion quest folder is set yet.\n\nPick the folder "
+                tr("No Expansion quest folder is set yet.\n\nPick the folder "
                 "holding your quest .json files and DialogueForge can list "
                 "them by name instead of making you remember ID numbers.\n\n"
-                "Choose it now?"):
+                "Choose it now?")):
             return False
         return self.pick_quest_folder()
 
@@ -9402,10 +10867,10 @@ class App(tk.Tk):
             if not self.quest_index and not self.npc_index:
                 messagebox.showinfo(
                     APP_TITLE,
-                    "Nothing readable found in that folder.\n\nPoint it at "
+                    tr("Nothing readable found in that folder.\n\nPoint it at "
                     "the folder containing your Expansion quest .json files "
                     "(the one with Title and ID in each file). Subfolders "
-                    "are searched too.")
+                    "are searched too."))
 
     # ---------------- theming
 
@@ -9611,6 +11076,10 @@ class App(tk.Tk):
                 self.notebook.tab(index, text=tr(title))
             except Exception:
                 pass
+        #! Built from numbers, so the walker above can only put back stale
+        #! English -- draw it again in the new language.
+        if hasattr(self, "dialogue_tab"):
+            self.dialogue_tab.update_speaker_length()
 
     def export_ui_template(self):
         """Write every interface string this session has shown into the
@@ -9730,6 +11199,8 @@ class App(tk.Tk):
         names = {id(self.dialogue_tab): "Dialogue",
                  id(self.quest_tab): "Quest wording",
                  id(self.menu_tab): "Menu appearance",
+                 #! Same file, so the same name -- one dirty mark for both.
+                 id(self.reputation_tab): "Menu appearance",
                  id(self.ai_settings_tab): "Global AI settings",
                  id(self.factions_tab): "Factions",
                  id(self.ai_patrols_tab): "AI patrols",
@@ -9893,9 +11364,9 @@ class App(tk.Tk):
                         and looks_like_framework(sub)):
                     if messagebox.askyesno(
                             APP_TITLE,
-                            "That looks like the profile root.\n\nThe mod's "
+                            tr("That looks like the profile root.\n\nThe mod's "
                             "files are in the \"%s\" folder inside it. Use that "
-                            "instead? (recommended)" % name):
+                            "instead? (recommended)") % name):
                         return sub
                     break
         except Exception:
@@ -9909,6 +11380,7 @@ class App(tk.Tk):
             try:
                 with open(path, "r", encoding="utf-8") as handle:
                     self.menu_tab.load(json.load(handle))
+                self.mark_loaded(self.menu_tab, path)
                 self.set_status("Loaded existing MenuConfig.json")
             except Exception as error:
                 self.set_status("MenuConfig.json could not be read: %s" % error)
@@ -9918,6 +11390,7 @@ class App(tk.Tk):
             try:
                 with open(ai_path, "r", encoding="utf-8") as handle:
                     self.ai_settings_tab.load(json.load(handle))
+                self.mark_loaded(self.ai_settings_tab, ai_path)
             except Exception:
                 pass
 
@@ -9927,6 +11400,7 @@ class App(tk.Tk):
             try:
                 with open(faction_path, "r", encoding="utf-8") as handle:
                     self.factions_tab.load(json.load(handle))
+                self.mark_loaded(self.factions_tab, faction_path)
             except Exception:
                 pass
 
@@ -9936,13 +11410,57 @@ class App(tk.Tk):
             try:
                 with open(patrol_path, "r", encoding="utf-8") as handle:
                     self.ai_patrols_tab.load(json.load(handle))
+                self.mark_loaded(self.ai_patrols_tab, patrol_path)
             except Exception:
                 pass
+
+    #! The tabs that each own one whole file. Saving one writes the entire
+    #! file from what the tab holds, so a tab that never read the file, or
+    #! read it before something else changed it, would silently replace it.
+    def single_file_owner(self, editor):
+        if editor is self.reputation_tab:
+            return self.menu_tab
+        if editor in (self.menu_tab, self.ai_settings_tab, self.factions_tab,
+                      self.ai_patrols_tab):
+            return editor
+        return None
+
+    def mark_loaded(self, editor, path):
+        owner = self.single_file_owner(editor)
+        if owner is not None:
+            self.loaded_files[id(owner)] = file_stamp(path)
+
+    def unread_on_disk(self, editor, path):
+        """The file on disk is not the one this tab last read or wrote."""
+        owner = self.single_file_owner(editor)
+        return (owner is not None and os.path.isfile(path)
+                and self.loaded_files.get(id(owner)) != file_stamp(path))
+
+    def confirm_unread_overwrite(self, editor, path):
+        """True to go ahead and save. Asks first when the file on disk is not
+        the one this tab last read -- never read, or changed since."""
+        if not self.unread_on_disk(editor, path):
+            return True
+
+        answer = messagebox.askyesnocancel(
+            APP_TITLE,
+            tr("%s has settings this tab hasn't read - either it was never "
+               "opened here, or it has changed since.\n\nSaving now would "
+               "replace every setting in it with what is on this tab.\n\n"
+               "Yes - load the file into this tab first (you'll need to make "
+               "your change again)\nNo - save over it anyway\nCancel - do "
+               "nothing") % os.path.basename(path))
+        if answer is None:
+            return False
+        if answer:
+            self.load_path(path)
+            return False
+        return True
 
     def create_structure(self):
         root = self.profile_path.get()
         if not root:
-            messagebox.showinfo(APP_TITLE, "Pick a profile folder first.")
+            messagebox.showinfo(APP_TITLE, tr("Pick a profile folder first."))
             return
         for folder in ["Dialogues", os.path.join("Dialogues", "Shared"),
                        "QuestText", "Localization"]:
@@ -9983,7 +11501,7 @@ class App(tk.Tk):
         conversation, so an owner can look it up instead of remembering it."""
         root = self.profile_path.get()
         if not root or not os.path.isdir(root):
-            messagebox.showinfo(APP_TITLE, "Pick a profile folder first.")
+            messagebox.showinfo(APP_TITLE, tr("Pick a profile folder first."))
             return
 
         known = set(q.get("id") for q in self.quest_index
@@ -10017,7 +11535,7 @@ class App(tk.Tk):
         if not scanned:
             messagebox.showinfo(
                 APP_TITLE,
-                "No conversations found under the Dialogues folder.")
+                tr("No conversations found under the Dialogues folder."))
             return
 
         report = build_quest_flow_report(
@@ -10031,7 +11549,7 @@ class App(tk.Tk):
         except Exception as error:
             messagebox.showerror(
                 APP_TITLE,
-                "Couldn't write the report: %s" % error)
+                tr("Couldn't write the report: %s") % error)
             return
 
         self.scan_files()
@@ -10062,7 +11580,7 @@ class App(tk.Tk):
         if not os.path.isfile(path):
             messagebox.showinfo(
                 APP_TITLE,
-                "No LoadLog.txt yet - it's written on server start.")
+                tr("No LoadLog.txt yet - it's written on server start."))
             return
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             content = handle.read()
@@ -10095,9 +11613,9 @@ class App(tk.Tk):
         except Exception as error:
             messagebox.showerror(
                 APP_TITLE,
-                "Couldn't read that file:\n\n%s\n\nIf you edited it by hand, "
+                tr("Couldn't read that file:\n\n%s\n\nIf you edited it by hand, "
                 "check for a trailing comma or a leftover comment - JSON "
-                "doesn't allow either." % error)
+                "doesn't allow either.") % error)
             return
 
         name = os.path.basename(path).lower()
@@ -10109,16 +11627,19 @@ class App(tk.Tk):
                             % (count, path))
         elif "Factions" in data or name == "factions.json":
             self.factions_tab.load(data)
+            self.mark_loaded(self.factions_tab, path)
             self.notebook.select(self.factions_tab)
             self.clear_editor_dirty("Factions")
             self.set_status("Loaded factions from %s" % path)
         elif "Patrols" in data or name == "aipatrols.json":
             self.ai_patrols_tab.load(data)
+            self.mark_loaded(self.ai_patrols_tab, path)
             self.notebook.select(self.ai_patrols_tab)
             self.clear_editor_dirty("AI patrols")
             self.set_status("Loaded AI patrols from %s" % path)
         elif "ResetOnDeath" in data or name == "aisettings.json":
             self.ai_settings_tab.load(data)
+            self.mark_loaded(self.ai_settings_tab, path)
             self.notebook.select(self.ai_settings_tab)
             self.clear_editor_dirty("Global AI settings")
             self.set_status("Loaded global AI settings from %s" % path)
@@ -10129,6 +11650,7 @@ class App(tk.Tk):
             self.set_status("Loaded quest wording from %s" % path)
         elif "Position" in data or name == "menuconfig.json":
             self.menu_tab.load(data)
+            self.mark_loaded(self.menu_tab, path)
             self.notebook.select(self.menu_tab)
             self.clear_editor_dirty("Menu appearance")
             self.set_status("Loaded menu config from %s" % path)
@@ -10140,8 +11662,8 @@ class App(tk.Tk):
         else:
             messagebox.showwarning(
                 APP_TITLE,
-                "That doesn't look like a Dialogue Framework config - no "
-                "Nodes, Quests, Position, Patrols or AI settings field found.")
+                tr("That doesn't look like a Dialogue Framework config - no "
+                "Nodes, Quests, Position, Patrols or AI settings field found."))
 
     # ---------------- save & validate
 
@@ -10149,8 +11671,9 @@ class App(tk.Tk):
         current = self.notebook.select()
         widget = self.nametowidget(current)
         if widget in (self.dialogue_tab, self.quest_tab, self.menu_tab,
-                      self.ai_settings_tab, self.factions_tab,
-                      self.ai_patrols_tab, self.translations_tab):
+                      self.reputation_tab, self.ai_settings_tab,
+                      self.factions_tab, self.ai_patrols_tab,
+                      self.translations_tab):
             return widget
         return None
 
@@ -10159,14 +11682,14 @@ class App(tk.Tk):
         if not editor:
             messagebox.showinfo(
                 APP_TITLE,
-                "This tab has nothing to validate. Switch to Dialogue, "
+                tr("This tab has nothing to validate. Switch to Dialogue, "
                 "Quest wording or Menu appearance, or use "
-                "'Check ALL config files'.")
+                "'Check ALL config files'."))
             return True
         issues, warnings = editor.validate()
         if not issues and not warnings:
             if not silent:
-                messagebox.showinfo(APP_TITLE, "No problems found.")
+                messagebox.showinfo(APP_TITLE, tr("No problems found."))
             return True
 
         window = tk.Toplevel(self)
@@ -10197,24 +11720,26 @@ class App(tk.Tk):
         editor = self.current_editor()
         if not editor:
             messagebox.showinfo(
-                APP_TITLE, "Switch to an editor tab to start something new.")
+                APP_TITLE, tr("Switch to an editor tab to start something new."))
             return
 
         labels = {
             self.dialogue_tab: "dialogue tree",
             self.quest_tab: "quest wording file",
             self.menu_tab: "menu appearance (back to defaults)",
+            #! One file, so this puts the whole of it back, colours included.
+            self.reputation_tab: "menu appearance (back to defaults)",
         }
         if editor not in labels:
             messagebox.showinfo(
                 APP_TITLE,
-                "This tab edits a single server file - open or edit it "
-                "directly rather than starting a blank one.")
+                tr("This tab edits a single server file - open or edit it "
+                "directly rather than starting a blank one."))
             return
         if not messagebox.askyesno(
                 APP_TITLE,
-                "Start a blank %s?\n\nAnything unsaved in this tab is lost. "
-                "Files already on disk are untouched."
+                tr("Start a blank %s?\n\nAnything unsaved in this tab is lost. "
+                "Files already on disk are untouched.")
                 % labels[editor]):
             return
 
@@ -10239,10 +11764,10 @@ class App(tk.Tk):
         editor = self.current_editor()
         if not editor:
             messagebox.showinfo(
-                APP_TITLE, "Switch to an editor tab to save something.")
+                APP_TITLE, tr("Switch to an editor tab to save something."))
             return
         if not self.profile_path.get():
-            messagebox.showinfo(APP_TITLE, "Pick a profile folder first.")
+            messagebox.showinfo(APP_TITLE, tr("Pick a profile folder first."))
             return
 
         if editor is self.dialogue_tab:
@@ -10279,27 +11804,27 @@ class App(tk.Tk):
         try:
             write_json(path, self.menu_tab.build_output())
         except Exception as error:
-            messagebox.showerror(APP_TITLE, "Couldn't save:\n\n%s" % error)
+            messagebox.showerror(APP_TITLE, tr("Couldn't save:\n\n%s") % error)
             return
         self.scan_files()
         self.set_status("Saved a copy to %s" % path)
         if os.path.basename(path).lower() != "menuconfig.json":
             messagebox.showinfo(
                 APP_TITLE,
-                "Saved.\n\nNote the mod only ever reads MenuConfig.json in "
+                tr("Saved.\n\nNote the mod only ever reads MenuConfig.json in "
                 "the root of the profile folder - this copy is for your own "
-                "reference.")
+                "reference."))
 
     def check_all_files(self):
         root = self.profile_path.get()
         if not root or not os.path.isdir(root):
-            messagebox.showinfo(APP_TITLE, "Pick a profile folder first.")
+            messagebox.showinfo(APP_TITLE, tr("Pick a profile folder first."))
             return
 
         self.scan_files()
         if not self.found_files:
             messagebox.showinfo(
-                APP_TITLE, "No config files found under:\n%s" % root)
+                APP_TITLE, tr("No config files found under:\n%s") % root)
             return
 
         results = []
@@ -10467,6 +11992,22 @@ class App(tk.Tk):
                     "Says Language '%s' but sits in the '%s' folder. The "
                     "folder wins - players get %s."
                     % (language, folder, folder))
+
+            #! Read in pieces like a tree's lines, so checked per piece too.
+            blocks = [b for b in (data.get("Trees") or [])
+                      + (data.get("Quests") or []) if isinstance(b, dict)]
+            for block in blocks:
+                for record in (block.get("Entries") or []):
+                    if not isinstance(record, dict):
+                        continue
+                    long_line = piece_line_warning(
+                        record.get("Text"), record.get("TextMore"),
+                        "The translation of '%s'" % record.get("Key", "?"),
+                        "Save it again from DialogueForge's Translations "
+                        "tab, which stores a long line in pieces the game "
+                        "joins back together.")
+                    if long_line:
+                        warnings.append(long_line)
 
             for block in (data.get("Trees") or []):
                 tree_file = str(block.get("TreeFile", "") or "").lower()
@@ -10643,25 +12184,29 @@ class App(tk.Tk):
         editor = self.current_editor()
         if not editor:
             messagebox.showinfo(
-                APP_TITLE, "Switch to an editor tab to save something.")
+                APP_TITLE, tr("Switch to an editor tab to save something."))
             return
         if not self.profile_path.get():
-            messagebox.showinfo(APP_TITLE, "Pick a profile folder first.")
+            messagebox.showinfo(APP_TITLE, tr("Pick a profile folder first."))
             return
 
         issues, _warnings = editor.validate()
         if issues:
             if not messagebox.askyesno(
                     APP_TITLE,
-                    "%d problem(s) found that will break this file in game.\n\n"
-                    "Save anyway?" % len(issues)):
+                    tr("%d problem(s) found that will break this file in game.\n\n"
+                    "Save anyway?") % len(issues)):
                 self.run_validation()
                 return
 
         path = editor.output_path()
+        guarded = self.unread_on_disk(editor, path)
+        if not self.confirm_unread_overwrite(editor, path):
+            return
         if os.path.isfile(path):
-            if not messagebox.askyesno(
-                    APP_TITLE, "Overwrite:\n%s ?" % path):
+            #! Already asked, in plainer terms, when the file was unread.
+            if not guarded and not messagebox.askyesno(
+                    APP_TITLE, tr("Overwrite:\n%s ?") % path):
                 return
             try:
                 backup = path + ".bak"
@@ -10675,9 +12220,11 @@ class App(tk.Tk):
         try:
             write_json(path, editor.build_output())
         except Exception as error:
-            messagebox.showerror(APP_TITLE, "Couldn't save:\n\n%s" % error)
+            messagebox.showerror(APP_TITLE, tr("Couldn't save:\n\n%s") % error)
             return
 
+        #! The tab and the file now agree, so the next save needs no warning.
+        self.mark_loaded(editor, path)
         self.scan_files()
         self.clear_editor_dirty(self.editor_name(editor))
         self.set_status("Saved %s" % path)
@@ -10685,9 +12232,9 @@ class App(tk.Tk):
             return
         messagebox.showinfo(
             APP_TITLE,
-            "Saved:\n%s\n\nRestart the server, then restart your game client "
+            tr("Saved:\n%s\n\nRestart the server, then restart your game client "
             "fully (a reconnect isn't enough), then check "
-            "Dialogues\\LoadLog.txt." % path)
+            "Dialogues\\LoadLog.txt.") % path)
 
 
 def main():

@@ -24,6 +24,14 @@ folder.
 
 ## What it does
 
+**Starts from the server you already have**
+
+The Import tab reads your trader maps, P2P traders, Expansion quest NPCs and AI
+patrols, shows you which of them can't talk yet, and writes each one you pick a
+starter conversation — already pointed at that character, with folders, ids and
+trader keys filled in. The only thing left is writing what they say. Nothing on
+your server is changed or moved.
+
 **Writes every config the mod uses**
 
 Dialogue trees for quest NPCs, traders and shared conversations, per-quest
@@ -85,12 +93,26 @@ it switches to the hand-in screen. Click into the no-quests wording and it
 shows that step, with your buttons under it. You never have to guess where a
 line ends up.
 
-<img src="docs/images/DF7.png" alt="The dialogue editor, showing the conversation outline, the node editor and the branch map">
+<img src="docs/images/DF7.png" alt="The editor with the live preview window beside it, drawing the same conversation as the in-game menu">
 
 
 ---
 
 ## A look around
+
+### Import
+
+Everyone your server already has, and whether they can talk yet. Pick the ones
+you want and DialogueForge writes each a starter conversation wired to them.
+Click a column heading to sort, type to narrow the list.
+
+Your AI patrols are listed the same way — name, faction, loadout, squad size
+and full route — so you can pick which squads talk. It also spots the classic
+mistake of a patrol spawning twice, because a talkable copy was made but the
+original was left in `AIPatrolSettings.json`, and can clean those up for you.
+Anything it deletes is backed up first.
+
+<img src="docs/images/DF2.png" alt="The Import tab listing quest NPCs that can't talk yet, and AI patrols with their full routes">
 
 ### Dialogue
 
@@ -117,7 +139,7 @@ Lines are picked at random per visit, so three or four phrasings stops a busy
 NPC sounding scripted. A finished quest can override any of these per quest on
 the Quest wording tab.
 
-<img src="docs/images/DF3.png" alt="The dialogue editor, showing the conversation outline, the node editor and the branch map">
+<img src="docs/images/DF3.png" alt="The Quest talk page, with a line above the quest list filled in">
 
 ### Quest wording
 
@@ -153,11 +175,21 @@ configs; your conversation files are never rewritten.
 ### Menu appearance
 
 Colour pickers for every part of the window, sliders for size and position,
-font presets, and the hint-icon toggle — with a live preview beside it.
+thirteen fonts and three text sizes, and the hint-icon toggle — with a live
+preview beside it.
 Colours are always written in the right order, which removes the single most
 common cause of an invisible dialogue box.
 
 <img src="docs/images/DF5.png" alt="The menu appearance tab with colour pickers and a live preview">
+
+### Reputation
+
+The reputation settings that apply to your whole server, in one place: whether
+players get a pop-up telling them who a choice pleased or annoyed, and what the
+standing page in Expansion's book calls itself and its three columns. Each box
+shows the word the mod falls back to when you leave it empty. It also points
+you at what is set per character instead — a character's own ranks and icons,
+and what a quest pays out.
 
 ### Check everything at once
 
@@ -206,8 +238,13 @@ the newer options until you open and save it.
 3. Click **Browse...** and pick the `DialogFramework` folder inside your
    server profile — the one with `MenuConfig.json` in it. Start your server
    once first if that folder doesn't exist yet.
+4. Open the **Import** tab and click **Look at my server**. Everyone you have
+   placed is listed with whether they can talk yet. **Pick everyone who can't
+   talk yet**, then **Write starter conversations**, and every one of them has
+   a conversation waiting on the Dialogue tab with their details already
+   filled in.
 
-That's it. The **Server files** tab now lists everything you have, and
+That's it. The **Server files** tab lists everything you have, and
 double-clicking a file opens it.
 
 > **Windows will show a blue "Windows protected your PC" box the first time.**
