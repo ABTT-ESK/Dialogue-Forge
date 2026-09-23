@@ -120,6 +120,12 @@ Three pages. **Flow** for the conversation itself, **Who it's for & voice
 lines** for targeting and audio, and **Quest talk** for what this NPC says
 around their quest list.
 
+**Who it's for** is also where you name the character — *The name at the top
+of the window*. Leave it empty and a quest NPC or trader keeps the name it
+already has. AI you can talk to have no name of their own, so that box is what
+gives them one, and since each member of a patrol has its own conversation,
+each one can be named separately.
+
 <img src="docs/images/DF1.png" alt="The dialogue editor with the branch map">
 
 ### Quest talk
@@ -160,6 +166,12 @@ That's the natural place to point players at whoever hands out the next quest.
 If several completed quests have wording, the highest quest ID wins, so the
 chain advances on its own with no extra setup.
 
+This is also where a hand-in moves reputation — one list for characters and,
+under it, **Faction standing** for whole factions. Doing the militia's dirty
+work can be +20 with them, −5 with the two gangs they lean on and +5 with the
+people those gangs were robbing, all from the one hand-in, so a quest is a
+choice about who you'd rather have as an enemy.
+
 Anything you leave blank falls back to the mod's built-in text, so you only
 fill in what you care about.
 
@@ -190,6 +202,11 @@ standing page in Expansion's book calls itself and its three columns. Each box
 shows the word the mod falls back to when you leave it empty. It also points
 you at what is set per character instead — a character's own ranks and icons,
 and what a quest pays out.
+
+Whole factions can keep a standing too, on the **Factions** tab: give a faction
+a reputation and quests can move it, and set the point where it stops treating
+the player as one of its own and opens fire. Climb back above that point and
+they calm down on their own — even a grudge earned by fighting them.
 
 ### Check everything at once
 

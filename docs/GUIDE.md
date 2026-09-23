@@ -162,6 +162,14 @@ Two things worth knowing:
   sets it for you, and uses all three where two traders share an entity class
   and a market file, since only the position tells those apart.
 
+**The name at the top of the window** — what players see above the speech.
+Leave it empty and nothing changes: a quest NPC keeps the name Expansion gave
+it, a trader keeps its own. It matters for **AI you can talk to**, who have no
+name of their own — without it their window shows a blank space where every
+other character has a name. Each member of a patrol has its own conversation,
+so Kolt and Deen on the same patrol can be named separately. It can be
+translated like any other text.
+
 **This character's reputation** — give the character a **name** (e.g. *Silent
 Guard*) and it gets its own reputation to track. You never type a code: Forge
 turns the name into the key for you (shown as *saved as: rep_silent_guard*), and
@@ -268,6 +276,23 @@ reputation. You can still type a custom flag name if you want a one-off. The
 **+ change / require this character's reputation** buttons fill in this
 character for you.
 
+**Carrying & time of day** (the section under it, *needs mod 1.7.0*) — two
+more ways to decide whether a button is there at all.
+
+- **Only show this option while carrying** — the item's class name exactly as
+  DayZ spells it (`Rag`, `NailBox`, `AmmoBox_556x45_20Rnd`) and how many.
+  Counted anywhere on the player, stacks included, the same way a quest counts
+  a collection — so a button and a quest always agree about what someone has.
+  Add as many rows as you like; all of them have to be met. *"I brought the
+  rags"* simply isn't there until they have them, which reads better than a
+  line telling them to come back. *Testing with an admin tool: an item spawned
+  straight into your inventory may not count until you drop it and pick it up
+  again — that's the spawn, not the condition.*
+- **Only show this option between** — two hours of the in-game day. A start
+  later than the end wraps over midnight, so 22:00 and 05:00 is night. The
+  line under the boxes says back what you've picked, in hours. **Both ends are
+  needed**: one left on *Any* and the button shows at every hour.
+
 ---
 
 ## Quest wording
@@ -300,6 +325,30 @@ completely fine.
 
 The **Reward picker line** is a single spoken line above the reward choice,
 used only by quests that let the player pick a reward.
+
+### Reputation for finishing this quest
+
+Applied on the server the moment the quest is handed in, however it was handed
+in — through a conversation or Expansion's own screen. Add a line per
+character whose opinion this changes.
+
+Under it, **Faction standing** *(needs mod 1.7.0)* does the same for whole
+factions, listing the ones you gave a reputation on the Factions tab. This is
+where a quest stops being a transaction and starts being a choice: doing the
+militia's dirty work can be
+
+- Militia **Increase by 20**
+- Red Hand **Decrease by 5**
+- Vultures **Decrease by 5**
+- Farmers **Increase by 5**
+
+— all from the one hand-in. There's no limit of one pleased and one annoyed:
+every faction that would have an opinion can have one, in whatever direction.
+A faction set to turn hostile acts on the number you leave it at.
+
+Both lists are the same list in the file, so a quest written before factions
+kept standings reads back exactly as you wrote it. Putting the same reputation
+in both boxes applies it twice — the problem checker says so.
 
 ### Once this quest is completed
 
@@ -459,6 +508,20 @@ Duplicate / Remove**, up to 32 factions (a limit baked into the mod). Each has:
   *custom* factions to truly ignore each other, tick it on **both**. Befriending
   a built-in Expansion faction only works if the built-in's own rules allow it
   (guards and passive factions), which is an Expansion limitation, not ours.
+- **Standing with players** *(needs mod 1.7.0)* — a **Reputation** for the
+  faction as a whole. *Use the name* fills in a sensible one. Give a faction
+  one and quests can move it, on the *Faction standing* list of the Quest
+  wording tab.
+  - **Turns hostile at or below** — tick it and pick the point. A player whose
+    standing falls to it stops being one of the faction's own and gets shot at.
+    Back above it and they calm down by themselves — including a grudge that
+    had built up from fighting them, which nothing else clears.
+  - **To show the standing to players**, put the same reputation on one of the
+    faction's talkable patrols' conversations (*Reputation* on the Dialogue
+    tab, with ranks). The faction's name, rank and icon then appear at the top
+    of that conversation and on the standing page of the player's book, just
+    like a character's. A standing no conversation names still works — it just
+    has nowhere to be seen.
 
 Behind the scenes the mod maps each faction onto a pre-registered slot, so this
 all works without touching Expansion's own files.
@@ -487,6 +550,15 @@ The detail panel is grouped:
   scale/looseness, default stance and look angle, unlimited reload.
 - **Spawn area** — the distance/spread/despawn radii and the random-start-point
   toggle. `-1` means "use Expansion's default".
+
+  **Read this one before you go looking for a patrol that never turns up.**
+  Expansion only spawns a patrol while a player is in the *ring* between its
+  minimum and maximum distance — not when they are closer than the minimum.
+  Left at `-1`, most servers use **400 m** and **1000 m**, so anyone you place
+  where players already stand will never appear: they are inside the minimum
+  before the game even looks. For a character meant to be walked up to, set the
+  **minimum distance to 0** and a maximum that covers the area. Expansion's
+  behaviour, not the mod's, and it looks exactly like a broken patrol.
 - **Waypoints** — where the patrol lives. **At least one is required** — with
   none the patrol does not spawn at all. One waypoint = it spawns there and holds
   position; extra waypoints = a route it walks (the first is the spawn point).

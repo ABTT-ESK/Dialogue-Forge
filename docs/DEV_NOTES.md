@@ -41,6 +41,18 @@ before writing when they differ. Forgetting `mark_loaded` is safe but noisy
 - **`FactionsTab` feeds custom names into the patrol Faction dropdown** through
   `App.custom_faction_names()`; the mod caps factions at
   `FACTION_MAX_SLOTS` (32), mirrored here.
+- **Faction standings (1.7.0) are not a new kind of thing.** A faction's
+  `ReputationVar` is an ordinary reputation key, so the quest tab's *Faction
+  standing* box writes into the very same `RepOnComplete` list as the box above
+  it — `QuestTextTab.select` splits the list by "is this key one a faction
+  keeps" (`App.faction_standings()`) and `commit` concatenates it back. Any op
+  whose key isn't a faction's lands in the character box, so a file written
+  before this round-trips unchanged; the split is display only. Ordering
+  within each box is preserved, which is all that matters since the two boxes
+  never share a key without the checker warning about it.
+- `known_reputations` lets a faction's explicit `ReputationVar` **override** the
+  key guessed from its name — the guess (`rep_key_from_name`) is only a default
+  the *Use the name* button fills in.
 
 ## Data model
 
@@ -51,9 +63,17 @@ before writing when they differ. Forgetting `mark_loaded` is safe but noisy
 - **Serialization writes every field explicitly.** Omitted fields do *not*
   inherit the mod's documented defaults (JSON loading skips constructors
   mod-side), so `_serialize_nodes` always writes them out.
-- **Only genuinely optional fields are written conditionally** (e.g.
-  `Stages`), so a file that never used them stays byte-identical and older mod
-  builds ignore what they never see.
+- **Only genuinely optional fields are written conditionally** (e.g. `Stages`,
+  and `SpeakerName`, `RequiredItems`, `ShowFromHour`/`ShowToHour` since 1.7.0),
+  so a file that never used them stays byte-identical and older mod builds
+  ignore what they never see. An empty `SpeakerName` means "leave the name as
+  it was", which is exactly how the mod reads a missing one.
+- **The two hours are written as a pair or not at all**, because the mod reads
+  `-1` on either as "any hour". The consequence is that the "only one end set"
+  warning can only ever fire on a **hand-edited** file — `build_output` has
+  already dropped a half range by the time the tab validates itself, and the
+  folder sweep is what reads raw files. The live hint under the boxes is what
+  catches it while editing.
 
 ## Config versioning
 

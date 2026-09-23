@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.7.0
+
+### Added
+- **A name for the character**, on the conversation itself — *The name at the
+  top of the window*, under the conversation's settings. Leave it empty and
+  nothing changes: a quest NPC or trader keeps the name it already has.
+  - **It is what gives talking AI a name.** They have none of their own, so
+    their window used to show a blank space. Each member of a patrol has its
+    own conversation, so each one can be named separately.
+  - **The Import tab fills it in** for a patrol it writes a conversation for,
+    using the patrol's faction, so an imported squad reads as something rather
+    than nothing until you name them yourself.
+  - It can be translated like any other text, and appears on the Translations
+    tab as *Character name*.
+
+  Needs Dialogue Framework 1.7.0 to show up in game.
+
+- **Two more conditions on a button** — *Carrying & time of day*, under
+  *Reputation & story flags*.
+  - **Only while carrying** — name the item and how many, and the button is
+    only there while the player has them. Counted anywhere on them, stacks
+    included, exactly the way a quest counts a collection.
+  - **Only between two hours** of the in-game day, wrapping over midnight for
+    a night-only line. The hint under the boxes says back what you picked, and
+    the problem checker flags a range with only one end set.
+
+  Needs Dialogue Framework 1.7.0.
+
+- **Factions keep a reputation** — *Standing with players*, on the Factions
+  tab. Give a faction a reputation and quests can move it; *Use the name*
+  fills in a sensible one.
+  - **Turns hostile at or below** a number you pick: that faction's AI stop
+    treating the player as one of their own and open fire. Back above it they
+    calm down on their own, including forgiving a grudge that had stuck.
+  - **A *Faction standing* list on the Quest wording tab**, under the
+    reputation one. One hand-in can be +20 with the militia, −5 with the two
+    gangs they lean on and +5 with the people those gangs were robbing —
+    a line for every faction that would have an opinion, in whatever
+    direction. It's the same list in the file, so quests you wrote before this
+    read back exactly as you left them.
+  - Warns when the same reputation is changed twice on one hand-in, when a
+    faction is set to turn hostile with no reputation to read, and when two
+    factions share a reputation.
+
+  Needs Dialogue Framework 1.7.0.
+
+---
+
 ## 1.6.0
 
 ### Added

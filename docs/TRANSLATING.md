@@ -91,7 +91,7 @@ a language stays honest as the editor grows.
 
 ## Current state
 
-`german` and `russian` cover the whole interface (467 strings). The other ten
+`german` and `russian` cover the whole interface (485 strings). The other ten
 languages have only the tab names and a handful of buttons — enough to see the
 app is
 translatable, not enough to call them translated. The Russian translation

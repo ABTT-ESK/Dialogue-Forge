@@ -15,7 +15,7 @@ try:
 except Exception:
     SpellChecker = None
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 APP_TITLE = "DialogueForge - DayZ Dialogue Framework config editor"
 SETTINGS_FILE = os.path.join(
     os.path.expanduser("~"), ".dialogueforge_settings.json")
@@ -563,6 +563,9 @@ def new_response():
         "ActionType": "NONE",
         "RequiredVars": [],
         "SetVars": [],
+        "RequiredItems": [],
+        "ShowFromHour": -1,
+        "ShowToHour": -1,
         "MaxUses": 0,
         "UsesKey": "",
     }
@@ -591,6 +594,7 @@ def new_tree():
         "TraderMinKeyMatches": 2,
         "AIPatrolID": 0,
         "AIPatrolSubID": 0,
+        "SpeakerName": "",
         "ReputationVar": "",
         "ReputationMax": 0,
         "ReputationTiers": [],
@@ -707,6 +711,21 @@ def clean_var_ops(raw):
     return ops
 
 
+def clean_item_needs(raw):
+    needs = []
+    for entry in (raw or []):
+        if not isinstance(entry, dict):
+            continue
+        class_name = str(entry.get("ClassName", "")).strip()
+        if not class_name:
+            continue
+        needs.append({
+            "ClassName": class_name,
+            "Amount": max(1, safe_int(entry.get("Amount", 1), 1)),
+        })
+    return needs
+
+
 
 
 # ------------------------------------------------- translation key builders
@@ -757,6 +776,14 @@ def loc_node_entries(nodes, stage_index, where_prefix):
 def loc_tree_entries(data):
     """Every player-visible string in a dialogue tree, in reading order."""
     entries = []
+
+    #! First, because it is the first thing a player reads: the name at the
+    #! top of the window. The mod looks it up under this exact key
+    #! (DialogueLocKeys.TreeSingle("SpeakerName")) -- change one side and
+    #! translations stop matching, with nothing to say so.
+    speaker_name = str(data.get("SpeakerName", "") or "")
+    if speaker_name.strip():
+        entries.append(("tree.SpeakerName", speaker_name, "Character name"))
 
     for field, label in TREE_TEXT_LISTS:
         for index, text in enumerate(data.get(field) or []):
@@ -1575,6 +1602,109 @@ class VarOpEditor(ttk.Frame):
         for op in (ops or []):
             self.add_row(op.get("Name", ""), op.get("Op", ""),
                          safe_int(op.get("Value", 0), 0))
+        self._loading = False
+
+
+#! "Any" is the mod's -1 on either hour: a gate needs both ends to mean
+#! anything, so one end left at Any switches the whole thing off.
+HOUR_ANY = "Any"
+
+
+def hour_labels():
+    return [HOUR_ANY] + ["%02d:00" % h for h in range(24)]
+
+
+def hour_to_value(label):
+    label = str(label or "").strip()
+    if not label or label == HOUR_ANY:
+        return -1
+    value = safe_int(label.split(":")[0], -1)
+    return value if 0 <= value <= 23 else -1
+
+
+def hour_label(value):
+    value = safe_int(value, -1)
+    if value < 0 or value > 23:
+        return HOUR_ANY
+    return "%02d:00" % value
+
+
+class ItemNeedEditor(ttk.Frame):
+    """Rows of "what to be carrying, and how many" for one option.
+
+    Counted the way the mod counts them: anywhere on the player, stacks
+    included, so what is written here matches what a quest would ask for.
+    """
+
+    def __init__(self, master, on_change=None):
+        ttk.Frame.__init__(self, master)
+        self.on_change = on_change
+        self.rows = []
+        self._loading = False
+
+        self.rows_frame = ttk.Frame(self)
+        self.rows_frame.pack(fill="x")
+
+        ttk.Button(self, text="+ Add", width=8,
+                   command=lambda: self.add_row()).pack(anchor="w", pady=(2, 2))
+
+    def _fire(self):
+        if self.on_change and not self._loading:
+            self.on_change()
+
+    def add_row(self, class_name="", amount=1):
+        row = ttk.Frame(self.rows_frame)
+        row.pack(fill="x", pady=1)
+
+        ttk.Label(row, text="Carrying").pack(side="left")
+
+        name_entry = ttk.Entry(row, width=22)
+        name_entry.insert(0, str(class_name or ""))
+        name_entry.pack(side="left", padx=4)
+        name_entry.bind("<KeyRelease>", lambda _e: self._fire())
+
+        ttk.Label(row, text="x").pack(side="left")
+
+        amount_spin = ttk.Spinbox(row, from_=1, to=1000000, width=6,
+                                  command=self._fire)
+        amount_spin.delete(0, tk.END)
+        amount_spin.insert(0, str(max(1, safe_int(amount, 1))))
+        amount_spin.pack(side="left", padx=4)
+        amount_spin.bind("<KeyRelease>", lambda _e: self._fire())
+
+        entry = {"frame": row, "name": name_entry, "amount": amount_spin}
+        ttk.Button(row, text="×", width=3,
+                   command=lambda: self._remove(entry)).pack(
+            side="left", padx=(4, 0))
+        self.rows.append(entry)
+        self._fire()
+
+    def _remove(self, entry):
+        entry["frame"].destroy()
+        if entry in self.rows:
+            self.rows.remove(entry)
+        self._fire()
+
+    def get_needs(self):
+        needs = []
+        for row in self.rows:
+            name = row["name"].get().strip()
+            if not name:
+                continue
+            needs.append({"ClassName": name,
+                          "Amount": max(1, safe_int(row["amount"].get(), 1))})
+        return needs
+
+    def set_needs(self, needs):
+        self._loading = True
+        for row in list(self.rows):
+            row["frame"].destroy()
+        self.rows = []
+        for need in (needs or []):
+            if not isinstance(need, dict):
+                continue
+            self.add_row(need.get("ClassName", ""),
+                         safe_int(need.get("Amount", 1), 1))
         self._loading = False
 
 
@@ -2532,6 +2662,12 @@ def starter_tree(kind, payload, tree_id, twins=1):
         tree["NPCIDs"] = [safe_int(payload.get("id"), -1)]
     elif kind == "patrol":
         tree["AIPatrolID"] = safe_int(payload.get("DialogueID"), 0)
+        #! AI carry no name of their own, so without this the window shows a
+        #! blank space where every other character has a name. The faction is
+        #! the only name a patrol has, and it is what the mod used to show for
+        #! Expansion's own factions -- something sensible to read until the
+        #! owner names the character properly.
+        tree["SpeakerName"] = str(payload.get("Faction", "") or "").strip()
 
     tree["Nodes"] = starter_nodes(kind, payload.get("greeting"))
     return tree
@@ -3031,6 +3167,30 @@ def validate_tree_dict(data, kind, key, quest_index=None):
                         "more than / is below / is exactly / is not."
                         % (label, o.get("Name"), o.get("Op")))
 
+            for need in (r.get("RequiredItems") or []):
+                if not isinstance(need, dict):
+                    continue
+                if not str(need.get("ClassName", "") or "").strip():
+                    warnings.append(
+                        "Option '%s' asks the player to be carrying "
+                        "something but doesn't say what - that row does "
+                        "nothing." % label)
+                elif safe_int(need.get("Amount", 1), 1) < 1:
+                    warnings.append(
+                        "Option '%s' asks for less than one '%s'."
+                        % (label, need.get("ClassName")))
+
+            #! Both ends or neither: the mod reads -1 on either as "any hour",
+            #! so half a range is silently no range at all.
+            from_hour = safe_int(r.get("ShowFromHour", -1), -1)
+            to_hour = safe_int(r.get("ShowToHour", -1), -1)
+            has_from = 0 <= from_hour <= 23
+            has_to = 0 <= to_hour <= 23
+            if has_from != has_to:
+                warnings.append(
+                    "Option '%s' has only one end of its time of day set, so "
+                    "it shows at every hour. Set both, or neither." % label)
+
     for index, tier in enumerate(data.get("ReputationTiers") or []):
         rank = index + 1
         face = str(tier.get("Icon", "") or "").strip().upper()
@@ -3084,9 +3244,13 @@ def validate_quest_dict(data):
         if reward_line:
             warnings.append(reward_line)
 
+        rep_counts = {}
         for op in (quest.get("RepOnComplete") or []):
             if not isinstance(op, dict):
                 continue
+            op_name = str(op.get("Name", "") or "").strip()
+            if op_name:
+                rep_counts[op_name] = rep_counts.get(op_name, 0) + 1
             if not str(op.get("Name", "") or "").strip():
                 issues.append(
                     "Quest %s changes a reputation on completion but doesn't "
@@ -3101,6 +3265,17 @@ def validate_quest_dict(data):
                 warnings.append(
                     "Quest %s changes reputation '%s' by 0, which does "
                     "nothing." % (quest.get("QuestID"), op.get("Name")))
+
+        #! Usually a faction listed twice: once as a character on the
+        #! reputation list and once on the faction standing list under it.
+        #! Both apply, one after the other, which is rarely what was meant.
+        for repeated, times in rep_counts.items():
+            if times > 1:
+                warnings.append(
+                    "Quest %s changes reputation '%s' %d times on the one "
+                    "hand-in - every one of them applies."
+                    % (quest.get("QuestID"), repeated, times))
+
         has_buttons = quest.get("NoQuestsBackTexts") \
             or quest.get("NoQuestsLeaveTexts")
         if has_buttons and not quest.get("NoQuestsTexts"):
@@ -3710,6 +3885,28 @@ class DialogueTab(ttk.Frame):
         self.ai_sub_id.pack(side="left", padx=4)
         self.ai_sub_id.bind("<KeyRelease>", lambda _e: self.mark_dirty())
 
+        name_frame = ttk.LabelFrame(
+            left, text="The name at the top of the window (optional)",
+            style="Section.TLabelframe")
+        name_frame.pack(fill="x", pady=(6, 0))
+        ttk.Label(
+            name_frame,
+            text="Leave this empty and the window shows the name the "
+                 "character already has — the one Expansion gives a quest "
+                 "NPC, or the trader's own name.\n"
+                 "AI you can talk to have no name of their own, so the window "
+                 "shows nothing unless you fill this in. Each member of a "
+                 "patrol has its own conversation, so each one can have its "
+                 "own name.",
+            wraplength=340, style="Hint.TLabel").pack(anchor="w", padx=6,
+                                                      pady=(4, 2))
+        name_row = ttk.Frame(name_frame)
+        name_row.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Label(name_row, text="Name shown").pack(side="left")
+        self.speaker_name = ttk.Entry(name_row, width=24)
+        self.speaker_name.pack(side="left", padx=(4, 0))
+        self.speaker_name.bind("<KeyRelease>", lambda _e: self.mark_dirty())
+
         rep_frame = ttk.LabelFrame(
             left, text="This character's reputation (optional)",
             style="Section.TLabelframe")
@@ -4288,6 +4485,78 @@ class DialogueTab(ttk.Frame):
             wraplength=430, style="Hint.TLabel").pack(anchor="w", padx=6,
                                                       pady=(0, 4))
 
+        carry_section = CollapsibleSection(
+            editor, "Carrying & time of day  (optional)")
+        carry_section.pack(fill="x", padx=6, pady=(2, 6))
+        carry_box = carry_section.content()
+
+        ttk.Label(carry_box, text="Only show this option while carrying:",
+                  style="Accent.TLabel").pack(anchor="w", padx=6, pady=(4, 0))
+        ttk.Label(
+            carry_box,
+            text="The item's class name, exactly as DayZ spells it (Rag, "
+                 "NailBox, AmmoBox_556x45_20Rnd). Counted anywhere on the "
+                 "player, stacks included - the same way a quest counts a "
+                 "collection, so an option and a quest agree about what "
+                 "someone is carrying. Leave empty to ask for nothing.",
+            wraplength=430, style="Hint.TLabel").pack(anchor="w", padx=6,
+                                                      pady=(2, 2))
+        self.required_items = ItemNeedEditor(
+            carry_box, on_change=self.commit_response)
+        self.required_items.pack(fill="x", padx=6, pady=(0, 6))
+
+        ttk.Label(carry_box, text="Only show this option between:",
+                  style="Accent.TLabel").pack(anchor="w", padx=6, pady=(4, 0))
+        hours = ttk.Frame(carry_box)
+        hours.pack(fill="x", padx=6, pady=(2, 2))
+        self.show_from_hour = ttk.Combobox(hours, values=hour_labels(),
+                                           width=7, state="readonly")
+        self.show_from_hour.set(HOUR_ANY)
+        self.show_from_hour.pack(side="left")
+        self.show_from_hour.bind("<<ComboboxSelected>>",
+                                 lambda _e: self.commit_response())
+        ttk.Label(hours, text="and").pack(side="left", padx=6)
+        self.show_to_hour = ttk.Combobox(hours, values=hour_labels(),
+                                         width=7, state="readonly")
+        self.show_to_hour.set(HOUR_ANY)
+        self.show_to_hour.pack(side="left")
+        self.show_to_hour.bind("<<ComboboxSelected>>",
+                               lambda _e: self.commit_response())
+        self.hours_hint = ttk.Label(carry_box, text="", wraplength=430,
+                                    style="Hint.TLabel")
+        self.hours_hint.pack(anchor="w", padx=6, pady=(0, 6))
+        self._refresh_hours_hint()
+
+    def _refresh_hours_hint(self):
+        """Says back, in hours a person reads, what the two boxes mean."""
+        if not hasattr(self, "hours_hint"):
+            return
+
+        start = hour_to_value(self.show_from_hour.get())
+        end = hour_to_value(self.show_to_hour.get())
+
+        if start < 0 and end < 0:
+            text = "Shown at any hour."
+        elif start < 0 or end < 0:
+            text = ("Both ends are needed - with one on Any this option is "
+                    "shown at any hour.")
+        elif start == end == 0:
+            #! The mod reads 0 and 0 as "any hour" -- an option that leaves
+            #! both out reads as zero and zero, and would otherwise vanish for
+            #! 23 hours a day.
+            text = ("00:00 to 00:00 means any hour. For the small hours pick "
+                    "00:00 and 01:00.")
+        elif start == end:
+            text = ("Shown during the %s hour only." % hour_label(start))
+        elif start < end:
+            text = ("Shown from %s until %s:59." % (hour_label(start),
+                                                    "%02d" % end))
+        else:
+            text = ("Shown from %s, over midnight, until %s:59."
+                    % (hour_label(start), "%02d" % end))
+
+        self.hours_hint.configure(text=text)
+
     def _on_reputation_typed(self):
         self._refresh_rep_hint()
         self.mark_dirty()
@@ -4699,6 +4968,8 @@ class DialogueTab(ttk.Frame):
         else:
             self.tree["AIPatrolID"] = 0
             self.tree["AIPatrolSubID"] = 0
+        if hasattr(self, "speaker_name"):
+            self.tree["SpeakerName"] = self.speaker_name.get().strip()
         if hasattr(self, "reputation_var"):
             self.tree["ReputationVar"] = rep_key_from_name(
                 self.reputation_var.get())
@@ -4740,6 +5011,8 @@ class DialogueTab(ttk.Frame):
         self.ai_patrol_id.insert(0, str(safe_int(self.tree.get("AIPatrolID", 0), 0)))
         self.ai_sub_id.delete(0, tk.END)
         self.ai_sub_id.insert(0, str(safe_int(self.tree.get("AIPatrolSubID", 0), 0)))
+        self.speaker_name.delete(0, tk.END)
+        self.speaker_name.insert(0, str(self.tree.get("SpeakerName", "") or ""))
         self.reputation_var.delete(0, tk.END)
         self.reputation_var.insert(
             0, rep_label_from_key(self.tree.get("ReputationVar", "") or ""))
@@ -5168,6 +5441,11 @@ class DialogueTab(ttk.Frame):
         if hasattr(self, "max_uses"):
             self.max_uses.delete(0, tk.END)
             self.max_uses.insert(0, "0")
+        if hasattr(self, "required_items"):
+            self.required_items.set_needs([])
+            self.show_from_hour.set(HOUR_ANY)
+            self.show_to_hour.set(HOUR_ANY)
+            self._refresh_hours_hint()
         self.loading = False
 
     def select_response(self, index):
@@ -5219,6 +5497,11 @@ class DialogueTab(ttk.Frame):
         if hasattr(self, "max_uses"):
             self.max_uses.delete(0, tk.END)
             self.max_uses.insert(0, str(safe_int(response.get("MaxUses", 0), 0)))
+        if hasattr(self, "required_items"):
+            self.required_items.set_needs(response.get("RequiredItems"))
+            self.show_from_hour.set(hour_label(response.get("ShowFromHour", -1)))
+            self.show_to_hour.set(hour_label(response.get("ShowToHour", -1)))
+            self._refresh_hours_hint()
         self.loading = False
         self.update_action_state()
 
@@ -5476,6 +5759,11 @@ class DialogueTab(ttk.Frame):
             response["MaxUses"] = uses
             if uses > 0 and not response.get("UsesKey"):
                 response["UsesKey"] = "uses_" + uuid.uuid4().hex[:8]
+        if hasattr(self, "required_items"):
+            response["RequiredItems"] = self.required_items.get_needs()
+            response["ShowFromHour"] = hour_to_value(self.show_from_hour.get())
+            response["ShowToHour"] = hour_to_value(self.show_to_hour.get())
+            self._refresh_hours_hint()
         self.refresh_outline(reload_editors=False)
         self.refresh_map()
         self.mark_dirty()
@@ -5739,6 +6027,11 @@ class DialogueTab(ttk.Frame):
         if safe_int(self.tree.get("AIPatrolID", 0), 0) > 0:
             out["AIPatrolID"] = safe_int(self.tree.get("AIPatrolID", 0), 0)
             out["AIPatrolSubID"] = safe_int(self.tree.get("AIPatrolSubID", 0), 0)
+        #! Only written when it has something in it: an empty one means "leave
+        #! the name as it was", which is every conversation written before
+        #! 1.7.0, and the mod reads a missing field the same way.
+        if (self.tree.get("SpeakerName") or "").strip():
+            out["SpeakerName"] = self.tree.get("SpeakerName", "").strip()
         if (self.tree.get("ReputationVar") or "").strip():
             out["ReputationVar"] = self.tree.get("ReputationVar", "").strip()
             out["ReputationMax"] = max(
@@ -5854,6 +6147,16 @@ class DialogueTab(ttk.Frame):
                     resp_entry["MaxUses"] = max_uses
                     resp_entry["UsesKey"] = (response.get("UsesKey", "")
                                              or "uses_" + uuid.uuid4().hex[:8])
+                needs = clean_item_needs(response.get("RequiredItems"))
+                if needs:
+                    resp_entry["RequiredItems"] = needs
+                #! The hours, like "only while", mean nothing one-ended: the
+                #! mod shows the option at any hour unless both are set.
+                from_hour = safe_int(response.get("ShowFromHour", -1), -1)
+                to_hour = safe_int(response.get("ShowToHour", -1), -1)
+                if 0 <= from_hour <= 23 and 0 <= to_hour <= 23:
+                    resp_entry["ShowFromHour"] = from_hour
+                    resp_entry["ShowToHour"] = to_hour
                 entry["Responses"].append(resp_entry)
             out_nodes.append(entry)
         return out_nodes
@@ -5893,6 +6196,7 @@ class DialogueTab(ttk.Frame):
         entry = dict(r)
         entry["RequiredVars"] = clean_var_ops(r.get("RequiredVars"))
         entry["SetVars"] = clean_var_ops(r.get("SetVars"))
+        entry["RequiredItems"] = clean_item_needs(r.get("RequiredItems"))
         return entry
 
     def load_tree(self, data, path=None):
@@ -6124,6 +6428,25 @@ class QuestTextTab(ttk.Frame):
             rep_box, "set", on_change=self.commit,
             name_provider=self.app.known_reputations)
         self.rep_on_complete.pack(fill="x", padx=6, pady=(0, 6))
+
+        faction_box = ttk.LabelFrame(rep_box, text="Faction standing",
+                                     style="Section.TLabelframe")
+        faction_box.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Label(
+            faction_box,
+            text="The same thing, for whole factions - one for each that has "
+                 "an opinion about this being done. Doing the militia's dirty "
+                 "work can be +20 with them, -5 with the two gangs they lean "
+                 "on and +5 with the people those gangs were robbing, all "
+                 "from this one hand-in. Factions keep a standing once you "
+                 "give them one on the Factions tab, and a faction set to "
+                 "turn hostile acts on what you put here.",
+            wraplength=580, style="Hint.TLabel").pack(anchor="w", padx=6,
+                                                      pady=(4, 2))
+        self.faction_rep_on_complete = VarOpEditor(
+            faction_box, "set", on_change=self.commit,
+            name_provider=self.app.faction_standings)
+        self.faction_rep_on_complete.pack(fill="x", padx=6, pady=(0, 6))
 
         def completed_intro(box):
             ttk.Label(box,
@@ -6402,7 +6725,18 @@ class QuestTextTab(ttk.Frame):
             editor.set_items(self.current.get(key) or [])
         self.reward_text.delete(0, tk.END)
         self.reward_text.insert(0, self.current.get("RewardSelectText", ""))
-        self.rep_on_complete.set_ops(self.current.get("RepOnComplete") or [])
+        #! One list in the file, two boxes on screen. An op lands in the
+        #! faction box when its reputation is one a faction keeps, so a
+        #! quest written before factions had standings still reads back
+        #! exactly as it was written.
+        all_rep_ops = self.current.get("RepOnComplete") or []
+        faction_keys = set(key for _name, key in self.app.faction_standings())
+        self.rep_on_complete.set_ops(
+            [op for op in all_rep_ops
+             if str((op or {}).get("Name", "")) not in faction_keys])
+        self.faction_rep_on_complete.set_ops(
+            [op for op in all_rep_ops
+             if str((op or {}).get("Name", "")) in faction_keys])
         self.loading = False
 
     def on_selected(self, _event=None):
@@ -6418,7 +6752,8 @@ class QuestTextTab(ttk.Frame):
         for key, editor in self.editors.items():
             self.current[key] = editor.get_items()
         self.current["RewardSelectText"] = self.reward_text.get()
-        self.current["RepOnComplete"] = self.rep_on_complete.get_ops()
+        self.current["RepOnComplete"] = self.rep_on_complete.get_ops() \
+            + self.faction_rep_on_complete.get_ops()
         index = self.quests.index(self.current)
         self.quest_list.delete(index)
         self.quest_list.insert(index, self.label_for(self.current))
@@ -8106,6 +8441,9 @@ def default_faction():
         "Loadout": "",
         "PlayerStance": "FRIENDLY",
         "FriendlyFactions": [],
+        "ReputationVar": "",
+        "HostileWhenLow": 0,
+        "HostileBelow": 0,
     }
 
 
@@ -8181,6 +8519,44 @@ class FactionsTab(ttk.Frame):
                                      style="Hint.TLabel")
         self.stance_hint.pack(anchor="w", padx=8, pady=(0, 4))
 
+        sbox = ttk.LabelFrame(detail, text="Standing with players",
+                              style="Section.TLabelframe")
+        sbox.pack(fill="x", padx=8, pady=(4, 4))
+        ttk.Label(
+            sbox,
+            text="Give the faction a standing and quests can move it - one "
+                 "hand-in can please this faction and annoy the ones it is at "
+                 "odds with, on the 'Faction standing' list of the Quest "
+                 "wording tab. Point a talkable patrol's conversation at the "
+                 "same reputation and the player sees where they stand in "
+                 "their book.",
+            wraplength=440, style="Hint.TLabel").pack(anchor="w", padx=6,
+                                                      pady=(2, 4))
+
+        varrow = ttk.Frame(sbox)
+        varrow.pack(fill="x", padx=6, pady=2)
+        ttk.Label(varrow, text="Reputation", width=14, anchor="w").pack(
+            side="left")
+        self.rep_var = ttk.Entry(varrow, width=26)
+        self.rep_var.pack(side="left")
+        self.rep_var.bind("<KeyRelease>", self._commit)
+        ttk.Button(varrow, text="Use the name", width=13,
+                   command=self._fill_rep_var).pack(side="left", padx=6)
+
+        hostrow = ttk.Frame(sbox)
+        hostrow.pack(fill="x", padx=6, pady=(2, 6))
+        self.hostile_low = tk.BooleanVar(value=False)
+        ttk.Checkbutton(hostrow, text="Turns hostile at or below",
+                        variable=self.hostile_low,
+                        command=self._commit).pack(side="left")
+        self.hostile_below = ttk.Spinbox(hostrow, from_=-1000000, to=1000000,
+                                         width=8, command=self._commit)
+        self.hostile_below.pack(side="left", padx=6)
+        self.hostile_below.bind("<KeyRelease>", self._commit)
+        self.standing_hint = ttk.Label(sbox, text="", wraplength=440,
+                                       style="Hint.TLabel")
+        self.standing_hint.pack(anchor="w", padx=6, pady=(0, 4))
+
         fbox = ttk.LabelFrame(detail, text="Won't fight these factions",
                               style="Section.TLabelframe")
         fbox.pack(fill="both", expand=True, padx=8, pady=(4, 8))
@@ -8230,6 +8606,32 @@ class FactionsTab(ttk.Frame):
         }
         self.stance_hint.configure(text=text.get(self.stance.get(), ""))
 
+    def _fill_rep_var(self):
+        name = self.name.get().strip()
+        if not name:
+            return
+        self._set_entry(self.rep_var, rep_key_from_name(name))
+        self._commit()
+
+    def _set_standing_hint(self):
+        var = self.rep_var.get().strip()
+        if not var:
+            self.standing_hint.configure(
+                text="No standing: quests can't move this faction and it "
+                     "never changes its mind about anyone.")
+            return
+        if not self.hostile_low.get():
+            self.standing_hint.configure(
+                text="Keeps score in '%s'. Nothing in the world changes when "
+                     "it moves - tick the box to make them act on it." % var)
+            return
+        point = safe_int(self.hostile_below.get(), 0)
+        self.standing_hint.configure(
+            text="A player at %d or below in '%s' stops being one of their "
+                 "own and gets shot at. Back above %d and they calm down, "
+                 "even if they had been fought often enough for the grudge to "
+                 "stick." % (point, var, point))
+
     def _names(self):
         return [str(f.get("Name", "") or "") for f in self.factions]
 
@@ -8241,6 +8643,8 @@ class FactionsTab(ttk.Frame):
         state = "normal" if on else "disabled"
         self.name.configure(state=state)
         self.loadout.configure(state=state)
+        self.rep_var.configure(state=state)
+        self.hostile_below.configure(state=state)
         self.stance.configure(state=("readonly" if on else "disabled"))
 
     def _refresh_list(self, keep):
@@ -8293,6 +8697,11 @@ class FactionsTab(ttk.Frame):
         self._set_entry(self.loadout, str(faction.get("Loadout", "") or ""))
         self.stance.set(self._stance_display(faction.get("PlayerStance")))
         self._set_stance_hint()
+        self._set_entry(self.rep_var, str(faction.get("ReputationVar", "") or ""))
+        self.hostile_low.set(bool(safe_int(faction.get("HostileWhenLow", 0), 0)))
+        self._set_entry(self.hostile_below,
+                        str(safe_int(faction.get("HostileBelow", 0), 0)))
+        self._set_standing_hint()
         self._build_friendly_checks(faction)
         self.loading = False
 
@@ -8302,6 +8711,10 @@ class FactionsTab(ttk.Frame):
         self._set_entry(self.loadout, "")
         self.stance.set("Friendly")
         self.stance_hint.configure(text="")
+        self._set_entry(self.rep_var, "")
+        self.hostile_low.set(False)
+        self._set_entry(self.hostile_below, "0")
+        self.standing_hint.configure(text="")
         for child in self.friendly_holder.winfo_children():
             child.destroy()
         self.friendly_vars = {}
@@ -8318,7 +8731,12 @@ class FactionsTab(ttk.Frame):
         faction["FriendlyFactions"] = [name for name, var
                                        in self.friendly_vars.items()
                                        if var.get()]
+        faction["ReputationVar"] = self.rep_var.get().strip()
+        faction["HostileWhenLow"] = 1 if (self.hostile_low.get()
+                                          and faction["ReputationVar"]) else 0
+        faction["HostileBelow"] = safe_int(self.hostile_below.get(), 0)
         self._set_stance_hint()
+        self._set_standing_hint()
         name = faction["Name"] or "(faction %d)" % (self.selected + 1)
         self.listbox.delete(self.selected)
         self.listbox.insert(self.selected, name)
@@ -8394,10 +8812,22 @@ class FactionsTab(ttk.Frame):
     def names(self):
         return [n for n in self._names() if n]
 
+    def standings(self):
+        """(faction name, reputation key) for every faction that keeps one."""
+        pairs = []
+        for faction in self.factions:
+            name = str(faction.get("Name", "") or "").strip()
+            var = str(faction.get("ReputationVar", "") or "").strip()
+            if name and var:
+                pairs.append((name, var))
+        pairs.sort(key=lambda pair: pair[0].lower())
+        return pairs
+
     def validate(self):
         issues = []
         warnings = []
         seen = {}
+        standings = {}
         for i, faction in enumerate(self.factions):
             name = str(faction.get("Name", "") or "").strip()
             if not name:
@@ -8408,6 +8838,19 @@ class FactionsTab(ttk.Frame):
                 issues.append("Two factions are both named '%s' - names must be "
                               "unique." % name)
             seen[key] = True
+
+            var = str(faction.get("ReputationVar", "") or "").strip()
+            if safe_int(faction.get("HostileWhenLow", 0), 0) and not var:
+                issues.append("'%s' is set to turn hostile when its standing "
+                              "drops, but has no reputation to read." % name)
+            if var:
+                if var.lower() in standings:
+                    warnings.append(
+                        "'%s' and '%s' share the reputation '%s' - anything "
+                        "that moves one moves both."
+                        % (standings[var.lower()], name, var))
+                else:
+                    standings[var.lower()] = name
         if len(self.factions) > FACTION_MAX_SLOTS:
             issues.append("%d factions defined; only the first %d will load."
                           % (len(self.factions), FACTION_MAX_SLOTS))
@@ -11213,6 +11656,13 @@ class App(tk.Tk):
             return []
         return tab.names()
 
+    def faction_standings(self):
+        """(name, reputation key) for the factions that keep a standing."""
+        tab = getattr(self, "factions_tab", None)
+        if tab is None:
+            return []
+        return tab.standings()
+
     def known_reputations(self):
         result = {}
         for key, label in getattr(self, "_rep_scan", {}).items():
@@ -11222,6 +11672,10 @@ class App(tk.Tk):
             key = rep_key_from_name(name)
             if key:
                 result[key] = name
+        #! A faction that names its own reputation wins over the one guessed
+        #! from its name -- that is the key the mod will actually read.
+        for name, key in self.faction_standings():
+            result[key] = name
         try:
             own = (self.dialogue_tab.reputation_var.get() or "").strip()
         except Exception:
