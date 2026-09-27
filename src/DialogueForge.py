@@ -2853,6 +2853,77 @@ def kind_and_key_from_path(path):
     return None, folder
 
 
+#! Expansion's ExpansionQuestObjectiveType values.
+OBJECTIVE_COLLECT = 4
+OBJECTIVE_DELIVERY = 5
+
+#! Characters with no Expansion quest NPC ID. A quest they give or take back
+#! has to be set up for that in Expansion's own files.
+NO_QUEST_NPC_KINDS = {"TRADER": "Traders", "P2P": "P2P traders",
+                      "AI": "AI characters"}
+
+#! Only Expansion's Delivery event looks up a turn-in NPC; every other
+#! objective type is handed in by quest state alone.
+TRADER_DELIVERY_NOTE = (
+    "Traders can't use Delivery objectives. Every other objective type "
+    "works - collection, travel, target, crafting and the rest.")
+
+
+def quest_needs_npc_problems(entry, who="Traders"):
+    """What goes wrong with this quest when a character with no quest NPC ID
+    gives it or takes it back. Each rule is the condition Expansion itself
+    tests, and each line says what to change in the quest's file."""
+    problems = []
+    if not entry:
+        return problems
+    label = "Quest %d (%s)" % (entry["id"], entry.get("title") or "untitled")
+    givers = entry.get("givers") or []
+    turnins = entry.get("turnins") or []
+    real_turnin = any(t > 0 for t in turnins)
+
+    #! ExpansionQuestModule starts every quest with no givers, no pre-quests
+    #! and no group flag for every player as they connect.
+    if not givers and not (entry.get("prequests") or []) \
+            and not entry.get("group"):
+        problems.append(
+            "%s has an empty QuestGiverIDs, so Expansion gives it to every "
+            "player the moment they log in. Set QuestGiverIDs to [-1] in its "
+            "Expansion quest file." % label)
+    #! ExpansionQuest opens its own hand-in window a second after the
+    #! objectives complete when the quest has no turn-in NPCs at all.
+    if not turnins and not entry.get("autocomplete") \
+            and not entry.get("achievement"):
+        problems.append(
+            "%s has an empty QuestTurnInIDs, so Expansion opens its own "
+            "hand-in window as soon as the objectives are done and the player "
+            "never comes back here. Set QuestTurnInIDs to [-1] in its "
+            "Expansion quest file." % label)
+
+    if real_turnin:
+        return problems
+    objectives = entry.get("objectives") or []
+    if any(o.get("type") == OBJECTIVE_DELIVERY for o in objectives):
+        problems.append(
+            "%s uses a Delivery objective. %s can't use those: a Delivery "
+            "objective needs a real quest NPC in QuestTurnInIDs to deliver "
+            "to. Any other objective type works; for \"bring me something\" "
+            "use a collection objective." % (label, who))
+    #! Only with turn-in IDs that match no NPC: an empty list (or
+    #! Autocomplete) makes Expansion aim the distance at the player instead.
+    if not turnins or entry.get("autocomplete"):
+        return problems
+    for objective in objectives:
+        if objective.get("type") == OBJECTIVE_COLLECT \
+                and objective.get("show_distance"):
+            problems.append(
+                "%s: its collection objective %d has ShowDistance on, but "
+                "there's no quest NPC for the distance to point at, so it "
+                "points at the wrong place. Set \"ShowDistance\": 0 in its "
+                "file in Objectives\\Collection."
+                % (label, objective.get("id", 0)))
+    return problems
+
+
 def validate_tree_dict(data, kind, key, quest_index=None):
     issues = []
     warnings = []
@@ -3126,6 +3197,33 @@ def validate_tree_dict(data, kind, key, quest_index=None):
             warnings.append(
                 "No option uses OPEN_TRADER, so players can't reach the "
                 "shop from this conversation.")
+
+    #! A tree outside a Trader_/P2PTrader_ folder is still a trader's if it
+    #! names one by its keys rather than by a quest NPC ID.
+    no_npc_kind = kind if kind in NO_QUEST_NPC_KINDS else None
+    if kind is None and not (data.get("NPCIDs") or []):
+        if safe_int(data.get("AIPatrolID"), 0) > 0:
+            no_npc_kind = "AI"
+        elif data.get("P2PTraderIDs"):
+            no_npc_kind = "P2P"
+        elif any(data.get(field) for field in (
+                "TraderIDs", "TraderClassNames", "TraderPositions")):
+            no_npc_kind = "TRADER"
+    if no_npc_kind and quest_index:
+        checked = set()
+        for node in all_nodes:
+            for response in (node.get("Responses") or []):
+                if response.get("ActionType") not in (
+                        "OFFER_QUEST", "ACCEPT_QUEST", "TURN_IN_QUEST"):
+                    continue
+                quest_id = safe_int(response.get("QuestID", -1), -1)
+                if quest_id <= 0 or quest_id in checked:
+                    continue
+                checked.add(quest_id)
+                entry = next((q for q in quest_index
+                              if q["id"] == quest_id), None)
+                warnings.extend(quest_needs_npc_problems(
+                    entry, NO_QUEST_NPC_KINDS[no_npc_kind]))
 
     if kind == "P2P":
         if not (data.get("P2PTraderIDs") or []):
@@ -4371,10 +4469,25 @@ class DialogueTab(ttk.Frame):
                                            style="Hint.TLabel")
         self.action_quest_note.grid(row=4, column=1, sticky="w", padx=4)
 
-        ttk.Label(fields, text="Next node").grid(row=5, column=0,
+        #! Only shown while a trader, P2P trader or AI option gives or takes
+        #! back a quest -- the one moment the Delivery rule matters.
+        self.trader_quest_warn = ttk.Label(fields, text="", wraplength=430,
+                                           style="Warn.TLabel",
+                                           justify="left")
+        self.trader_quest_warn.grid(row=5, column=1, sticky="w", padx=4,
+                                    pady=(2, 2))
+        self.trader_quest_warn.grid_remove()
+        #! Wraps to the column, not a fixed width: it's a warning, so none of
+        #! it may be cut off when the window is narrow.
+        fields.bind("<Configure>", lambda _e: self.trader_quest_warn.configure(
+            wraplength=max(200, fields.winfo_width()
+                           - self.action_quest.master.winfo_x() - 12)),
+            add="+")
+
+        ttk.Label(fields, text="Next node").grid(row=6, column=0,
                                                  sticky="w", pady=3)
         next_row = ttk.Frame(fields)
-        next_row.grid(row=5, column=1, sticky="w", padx=4, pady=3)
+        next_row.grid(row=6, column=1, sticky="w", padx=4, pady=3)
         self.next_node = ttk.Combobox(next_row, width=19, state="readonly")
         self.next_node.pack(side="left")
         self.next_node.bind("<<ComboboxSelected>>",
@@ -5414,6 +5527,8 @@ class DialogueTab(ttk.Frame):
         if self.show_advanced.get():
             values += ADVANCED_ACTION_TYPES
         self.action_type["values"] = values
+        if hasattr(self, "trader_quest_warn"):
+            self.update_trader_quest_warning()
 
     def clear_response_editor(self):
         self.loading = True
@@ -5429,6 +5544,7 @@ class DialogueTab(ttk.Frame):
         self.hide_note.configure(text="")
         self.state_note.configure(text="")
         self.action_quest_note.configure(text="")
+        self.trader_quest_warn.grid_remove()
         self.action_hint.configure(
             text="Pick an option in the outline, or add one.")
         self.next_node.configure(state="disabled")
@@ -5516,6 +5632,12 @@ class DialogueTab(ttk.Frame):
             self.speaker_lines.refresh_quest_choices()
 
     def update_gate_note(self):
+        #! Every quest field on the option leads here, so the notes under
+        #! Quest to use, Hide after and Only while follow the dropdowns too.
+        self.update_lock_note()
+        self.update_extra_quest_notes()
+
+    def update_lock_note(self):
         if not self.current_response:
             self.gate_note.configure(text="")
             return
@@ -5564,8 +5686,6 @@ class DialogueTab(ttk.Frame):
         self.set_gate_value(dialog.chosen)
         self.update_gate_note()
         self.commit_response()
-
-        self.update_extra_quest_notes()
 
     def _pick_quest(self, title, hint):
         if not self.app.ensure_quest_folder():
@@ -5680,6 +5800,26 @@ class DialogueTab(ttk.Frame):
                          % quest_text)
         else:
             self.action_quest_note.configure(text="")
+
+        self.update_trader_quest_warning()
+
+    def update_trader_quest_warning(self):
+        action = self.action_type.get()
+        who = NO_QUEST_NPC_KINDS.get(self.target_kind.get())
+        if not self.current_response or not who or action not in (
+                "OFFER_QUEST", "ACCEPT_QUEST", "TURN_IN_QUEST"):
+            self.trader_quest_warn.grid_remove()
+            return
+        note = TRADER_DELIVERY_NOTE
+        if who != "Traders":
+            note = note.replace("Traders", who, 1)
+        lines = [note]
+        quest_text = self.action_quest.get().strip()
+        if quest_text and quest_text != NO_ACTION_QUEST_LABEL:
+            entry = self.app.quest_lookup(quest_id_from_label(quest_text, 0))
+            lines.extend(quest_needs_npc_problems(entry, who))
+        self.trader_quest_warn.configure(text="\n\n".join(lines))
+        self.trader_quest_warn.grid()
 
     def set_gate_value(self, quest_id):
         if quest_id and quest_id > 0:
@@ -11244,6 +11384,7 @@ class App(tk.Tk):
         self.npc_index = []
         root = self.quest_folder.get()
         seen = set()
+        objective_info = {}
 
         for base in self.quest_scan_roots(root):
             for current, _dirs, files in os.walk(base):
@@ -11260,10 +11401,17 @@ class App(tk.Tk):
                             data = json.load(handle)
                     except Exception:
                         continue
-                    if not isinstance(data, dict) or "ObjectiveType" in data:
+                    if not isinstance(data, dict):
                         continue
                     ident = data.get("ID")
                     if not isinstance(ident, int) or isinstance(ident, bool):
+                        continue
+                    if "ObjectiveType" in data:
+                        #! Objective IDs are only unique within a type.
+                        #! ShowDistance defaults to on in Expansion.
+                        objective_info[(safe_int(data.get("ObjectiveType"), 0),
+                                        ident)] = bool(
+                            data.get("ShowDistance", True))
                         continue
                     if "NPCName" in data:
                         self.npc_index.append({
@@ -11285,6 +11433,11 @@ class App(tk.Tk):
                         turnins = [t for t in (data.get("QuestTurnInIDs") or [])
                                    if isinstance(t, int)
                                    and not isinstance(t, bool)]
+                        objectives = [
+                            {"type": safe_int(o.get("ObjectiveType"), 0),
+                             "id": safe_int(o.get("ID"), 0)}
+                            for o in (data.get("Objectives") or [])
+                            if isinstance(o, dict)]
                         self.quest_index.append({
                             "id": ident,
                             "title": data.get("Title") or name,
@@ -11292,7 +11445,22 @@ class App(tk.Tk):
                             "desc_turnin": turnin_desc,
                             "givers": givers,
                             "turnins": turnins,
+                            "prequests": [
+                                p for p in (data.get("PreQuestIDs") or [])
+                                if isinstance(p, int)
+                                and not isinstance(p, bool)],
+                            "group": bool(data.get("IsGroupQuest")),
+                            "autocomplete": bool(data.get("Autocomplete")),
+                            "achievement": bool(data.get("IsAchievement")),
+                            "objectives": objectives,
                             "file": path})
+
+        #! A quest's objective list only holds type and ID; the setting lives
+        #! in the objective's own file. None when that file wasn't found.
+        for entry in self.quest_index:
+            for objective in entry["objectives"]:
+                objective["show_distance"] = objective_info.get(
+                    (objective["type"], objective["id"]))
 
         self.quest_index.sort(key=lambda e: e["id"])
         self.npc_index.sort(key=lambda e: e["id"])

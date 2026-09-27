@@ -236,8 +236,8 @@ Each button needs two things — its text, and what it does:
 The dropdown only offers the actions that make sense for what you're editing,
 so you can't give a trader a quest list or a quest NPC a shop by accident.
 
-Tick **Show advanced actions** for three more. Two of them take a quest in
-"Quest to use" and then work anywhere, on any character:
+Tick **advanced** next to the dropdown for three more. Two of them take a
+quest in "Quest to use" and then work anywhere, on any character:
 
 | What it does | Result |
 |---|---|
@@ -245,10 +245,10 @@ Tick **Show advanced actions** for three more. Two of them take a quest in
 | **TURN_IN_QUEST** | Take a finished quest back and pay it out, opening the reward picker if there's a choice. The player is told "You haven't finished that yet." if they haven't. |
 | **DECLINE_QUEST** | Only works inside the live quest-detail step the mod builds itself. |
 
-**Giving a trader quests.** A trader can't show a quest list, but it can run a
-whole quest end to end with these: **OFFER_QUEST** to give it, then
-**TURN_IN_QUEST** to take it back. One button per quest, with **Quest lock**
-and **Hide after** swapping them over as the player progresses.
+**Giving a trader quests.** A trader can't show a quest list, but one
+**OFFER_QUEST** button runs a whole quest: it offers it, then shows the
+in-progress screen, then the hand-in. Step by step in
+[Giving a trader a quest](#giving-a-trader-a-quest) below.
 
 "Next node" only applies to **NONE** — it greys itself out otherwise.
 
@@ -292,6 +292,91 @@ more ways to decide whether a button is there at all.
   later than the end wraps over midnight, so 22:00 and 05:00 is night. The
   line under the boxes says back what you've picked, in hours. **Both ends are
   needed**: one left on *Any* and the button shows at every hour.
+
+---
+
+## Giving a trader a quest
+
+A trader can hand out a quest and take it back, all from its conversation.
+
+> **Traders can't use Delivery objectives.** A Delivery objective needs a real
+> quest NPC to hand in to. On a trader it never completes, and the player gets
+> an error. Every other objective type works — collection, travel, target,
+> crafting and the rest. For "bring me something", use a collection objective.
+
+### 1 · In the Expansion quest file
+
+Forge doesn't write Expansion's quest files, so open the quest in
+`ExpansionMod\Quests\Quests\` in a text editor and check these:
+
+| Field | Set it to | If you don't |
+|---|---|---|
+| `QuestGiverIDs` | `[-1]` | Left empty on a quest with no `PreQuestIDs`, **every player gets the quest the moment they log in.** |
+| `QuestTurnInIDs` | `[-1]` | Left empty, Expansion opens its own hand-in window as soon as the objectives are done, so the player never comes back to the trader. |
+| `Objectives` | any type except Delivery | See the box above. |
+
+If it's a collection objective, set `"ShowDistance": 0` in its own file, in
+`ExpansionMod\Quests\Objectives\Collection\`. There's no quest NPC for the
+distance marker to point at, so it would point at the wrong place.
+
+### 2 · In Forge
+
+1. Set **Expansion quests** at the top of the window to your Expansion
+   `Quests` folder, so you can pick quests by name.
+2. On **Dialogue → Who it's for & voice lines**, choose **A trader** and press
+   **Pick from trader map...** to choose your trader. (Or make its starter
+   conversation on the **Import** tab and open that.)
+3. On **Dialogue → Flow**, click the first node and press **Add option**.
+4. Fill in the option:
+   - **Button text** — the player's line, e.g. *"Need a hand with anything?"*
+     The same button is used at every stage of the quest, so pick words that
+     still make sense once they've taken it.
+   - **What it does** — **OFFER_QUEST**.
+   - **Quest to use** — your quest.
+   - Under **Show / hide based on quest (optional)**, set **Hide after** to
+     the same quest, so the button goes away once it's handed in.
+5. Make sure the node still has an **OPEN_TRADER** button, so the shop is one
+   click away.
+6. *Optional but worth it:* give the quest screens a way back. On
+   **Dialogue → Quest talk**, fill in **Back to the conversation** under
+   **Offer screen**, **In-progress screen** and **Turn-in screen** — that
+   covers every quest this trader gives. With none, the quest screens can only
+   be closed, not backed out of. (The **Quest wording** tab can set these, and
+   the accept, decline, in-progress and hand-in buttons, for one quest.)
+7. **Save**, then press **Check ALL config files**. With **Expansion quests**
+   set, it reads the quest's Expansion files and warns about every setting
+   in step 1 that's wrong. The same warnings show in orange under **Quest to
+   use** as you pick the quest.
+8. Restart the server **and** fully restart the game.
+
+That one button runs the whole quest. The player sees the offer first, then a
+"still working on it" screen, then the hand-in screen once the objectives are
+done.
+
+### A second quest after the first
+
+- **In Expansion:** give the second quest `"PreQuestIDs": [<first quest ID>]`.
+  It can't be taken until the first is handed in.
+- **In Forge:** add another **OFFER_QUEST** button for the second quest. Set
+  **Quest lock** to the first quest and **Hide after** to the second. It
+  appears once the first is handed in and goes away once the second is.
+- **A new greeting** *(optional)*: in the node's **Extra spoken lines**, press
+  **Add line**, write it, and set **Standard greeting after** to the first
+  quest.
+
+Handed in is what counts. Finishing the objectives makes a quest *ready*, not
+*completed*, so a **Quest lock** won't open until the player has turned it in.
+
+### If it isn't working
+
+| What you see | What to check |
+|---|---|
+| Every player has the quest as soon as they log in | `QuestGiverIDs` is empty. Set it to `[-1]`. |
+| Expansion's quest window pops up when the objectives are done | `QuestTurnInIDs` is empty. Set it to `[-1]`. |
+| The quest never completes, and the player gets an error | It uses a Delivery objective. Swap it for any other type. |
+| The quest button never appears | Its **Quest lock** quest hasn't been handed in yet. |
+| The trader opens the shop straight away | The conversation isn't attached to that trader. Press **Pick from trader map...** again. |
+| Nothing changes after editing | Restart the server **and** fully restart the game. |
 
 ---
 
